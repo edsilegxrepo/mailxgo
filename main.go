@@ -209,7 +209,7 @@ func priorityString(strings []string) string {
 func priorityInt(emptyval int, ints []int) int {
 	var result = emptyval
 	for _, val := range ints {
-		if val != emptyval {
+		if val != 0 {
 			result = val
 		}
 	}
