@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-var version = "1.1.8"
+var version = "1.1.9"
 
 var (
 	// Long-form flags
@@ -142,7 +142,7 @@ func main() {
 
 	// Clearly define our config priorities, lowest to highest: config files, long flags, short flags.
 	smtpServer = priorityString([]string{config.SMTPServer, smtpServer, smtpServerShort})
-	smtpPort = priorityInt(0, []int{config.SMTPPort, smtpPort, smtpPortShort})
+	smtpPort = priorityInt([]int{config.SMTPPort, smtpPort, smtpPortShort})
 	if smtpPort == 0 {
 		smtpPort = 587
 	}
@@ -217,10 +217,10 @@ func priorityString(strings []string) string {
 	return result
 }
 
-func priorityInt(emptyval int, ints []int) int {
-	var result = emptyval
+func priorityInt(ints []int) int {
+	var result = 0
 	for _, val := range ints {
-		if val != emptyval {
+		if val != 0 {
 			result = val
 		}
 	}
