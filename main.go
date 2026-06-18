@@ -23,7 +23,7 @@ var (
 
 	fromEmail string
 	toEmail   string
-	replyTo string
+	replyTo   string
 
 	subject string
 	body    string
@@ -48,7 +48,7 @@ var (
 
 	fromEmailShort string
 	toEmailShort   string
-	replyToShort string
+	replyToShort   string
 
 	subjectShort string
 	bodyShort    string
@@ -62,12 +62,12 @@ var (
 func init() {
 	// Long-form flags
 	flag.StringVar(&smtpServer, "smtp-server", "", "SMTP server for sending emails")
-	flag.IntVar(&smtpPort, "smtp-port", 587, "SMTP server port")
+	flag.IntVar(&smtpPort, "smtp-port", 0, "SMTP server port (default 587)")
 	flag.StringVar(&username, "smtp-username", "", "Username for SMTP authentication")
 	flag.StringVar(&password, "smtp-password", "", "Password for SMTP authentication")
 	flag.BoolVar(&noAuth, "no-auth", false, "Use unauthenticated SMTP")
 
-	flag.StringVar(&tlsMode, "tls-mode", "tls", "TLS mode (none, tls-skip, tls)")
+	flag.StringVar(&tlsMode, "tls-mode", "", "TLS mode (none, tls-skip, tls) (default tls)")
 
 	flag.StringVar(&configFile, "config", "", "Path to the SMTP config file")
 
@@ -85,12 +85,12 @@ func init() {
 
 	// Short-form flags
 	flag.StringVar(&smtpServerShort, "s", "", "SMTP server for sending emails (short)")
-	flag.IntVar(&smtpPortShort, "p", 587, "SMTP server port (short)")
+	flag.IntVar(&smtpPortShort, "p", 0, "SMTP server port (short)")
 	flag.StringVar(&usernameShort, "u", "", "Username for SMTP authentication (short)")
 	flag.StringVar(&passwordShort, "w", "", "Password for SMTP authentication (short)")
 	flag.BoolVar(&noAuthShort, "na", false, "Use unauthenticated SMTP (short)")
 
-	flag.StringVar(&tlsModeShort, "l", "tls", "TLS mode (short)")
+	flag.StringVar(&tlsModeShort, "l", "", "TLS mode (short)")
 
 	flag.StringVar(&configFileShort, "c", "", "Path to the SMTP config file (short)")
 
@@ -134,18 +134,25 @@ func main() {
 	if configFile != "" {
 		c, err := loadConfig(configFile)
 		if err != nil {
-			fmt.Printf("Error loading config file: %v", err)
+			fmt.Fprintf(os.Stderr, "Error loading config file: %v\n", err)
+			os.Exit(1)
 		}
 		config = c
 	}
 
-	// Clearly define our config priorities, lowest to highest: config files, long flags, short flags
+	// Clearly define our config priorities, lowest to highest: config files, long flags, short flags.
 	smtpServer = priorityString([]string{config.SMTPServer, smtpServer, smtpServerShort})
-	smtpPort = priorityInt(587, []int{config.SMTPPort, smtpPort, smtpPortShort})
+	smtpPort = priorityInt(0, []int{config.SMTPPort, smtpPort, smtpPortShort})
+	if smtpPort == 0 {
+		smtpPort = 587
+	}
 	username = priorityString([]string{config.SMTPUsername, username, usernameShort})
 	password = priorityString([]string{config.SMTPPassword, password, passwordShort})
 	noAuth = config.NoAuth || noAuth || noAuthShort
 	tlsMode = priorityString([]string{config.TLSMode, tlsMode, tlsModeShort})
+	if tlsMode == "" {
+		tlsMode = "tls"
+	}
 	fromEmail = priorityString([]string{config.FromEmail, fromEmail, fromEmailShort})
 
 	toEmail = priorityString([]string{toEmail, toEmailShort})
@@ -171,7 +178,8 @@ func main() {
 	if bodyFile != "" {
 		content, err := os.ReadFile(bodyFile)
 		if err != nil {
-			fmt.Printf("\nError reading body file: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error reading body file: %v\n", err)
+			os.Exit(1)
 		}
 		body = priorityString([]string{string(content), body}) //preserve the "flags override files" semantic
 	}
@@ -193,7 +201,10 @@ func main() {
 		Usage()
 	}
 
-	sendEmail(smtpServer, smtpPort, username, password, fromEmail, toEmails, replyTo, subject, body, bodyFile, attachmentPaths, tlsMode, noAuth)
+	if err := sendEmail(smtpServer, smtpPort, username, password, fromEmail, toEmails, replyTo, subject, body, bodyFile, attachmentPaths, tlsMode, noAuth); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
 }
 
 func priorityString(strings []string) string {
