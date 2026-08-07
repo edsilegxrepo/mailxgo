@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-var version = "1.1.9"
+var version = "1.2.0" // Application version
 
 var (
 	// Long-form flags
