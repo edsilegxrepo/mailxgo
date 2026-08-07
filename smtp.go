@@ -67,6 +67,9 @@ func sendEmail(smtpServer string, smtpPort int, username string, password string
 			ServerName:         smtpServer,
 		}
 		clientOptions = append(clientOptions, mail.WithTLSConfig(tlsSkipConfig))
+		if smtpPort == 465 {
+			clientOptions = append(clientOptions, mail.WithSSL())
+		}
 	case "tls":
 		if smtpPort == 465 {
 			clientOptions = append(clientOptions, mail.WithSSL())
