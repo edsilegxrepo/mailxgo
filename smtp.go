@@ -68,7 +68,11 @@ func sendEmail(smtpServer string, smtpPort int, username string, password string
 		}
 		clientOptions = append(clientOptions, mail.WithTLSConfig(tlsSkipConfig))
 	case "tls":
-		clientOptions = append(clientOptions, mail.WithTLSPolicy(mail.TLSMandatory))
+		if smtpPort == 465 {
+			clientOptions = append(clientOptions, mail.WithSSL())
+		} else {
+			clientOptions = append(clientOptions, mail.WithTLSPolicy(mail.TLSMandatory))
+		}
 	default:
 		return fmt.Errorf("invalid tls-mode %q (expected none, tls-skip, or tls)", tlsMode)
 	}
