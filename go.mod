@@ -1,4 +1,4 @@
-module github.com/KeepSec-Technologies/Mail2Go
+module github.com/edsilegxrepo/mailxgo
 
 go 1.22
 
