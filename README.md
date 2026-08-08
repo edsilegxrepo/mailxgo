@@ -1,156 +1,190 @@
-<p align="center">
- <img src="https://github.com/KeepSec-Technologies/Mail2Go/assets/108779415/afb750ff-0320-46d5-8e03-e26dfbde1c49"
-</p>
+# mailxgo - Enterprise CLI SMTP Client & Gateway Diagnostic Suite
 
-# Mail2Go - Lightweight CLI SMTP client
+[![License](./LICENSE)](./LICENSE)
+[![Go Version](./go.mod)](./go.mod)
 
-[![License](https://img.shields.io/github/license/KeepSec-Technologies/Mail2Go)](./LICENSE)
-[![GitHub issues](https://img.shields.io/github/issues-raw/KeepSec-Technologies/Mail2Go)](https://github.com/KeepSec-Technologies/Mail2Go/issues)
-[![GitHub go.mod Go version (branch & subdirectory of monorepo)](https://img.shields.io/github/go-mod/go-version/KeepSec-Technologies/Mail2Go/main)](./go.mod)
+`mailxgo` is a high-performance command-line SMTP client and pre-flight gateway diagnostic engine written in Go, designed for Managed File Transfer (MFT) automation, job schedulers, and enterprise email dispatch.
 
-Mail2Go is a very lightweight command-line SMTP client written in Go, designed to send emails from the command-line easily.
+---
+
+## Acknowledgements & Inspiration
+
+`mailxgo` was inspired by and builds upon the work and concepts from:
+- [mail2go](https://github.com/KeepSec-Technologies/Mail2Go)
+- [mailsend-go](https://github.com/muquit/mailsend-go)
+
+---
 
 ## Table of Contents
 
+- [Acknowledgements & Inspiration](#acknowledgements--inspiration)
 - [Features](#features)
 - [Requirements](#requirements)
-- [Installation](#installation)
 - [Building from Source](#building-from-source)
+- [Programmatic Go Library](#programmatic-go-library)
 - [Usage](#usage)
 - [Examples](#examples)
-- [Contributing](#contributing)
 - [License](#license)
+
+---
 
 ## Features
 
-- **Send Emails with Ease**: Quickly send emails with subject, body, and multiple recipients.
-- **Attachments Support**: Attach multiple files of various types to your emails.
-- **HTML and Plain Text**: Supports both HTML and plain text formats for email bodies.
-- **Command Line Interface**: Easy-to-use CLI arguments for configuring and sending emails.
-- **Flexible Configuration**: SMTP server, TLS, port, username, and password can be configured through CLI arguments or a JSON configuration file.
-- **Automatic Configuration File Detection**: Will automatically search for a default configuration file in the user's config directory if no configuration file is provided (e.g., `~/.config/mail2go/config.json`).
+- **Send Emails with Ease**: Quickly send emails with subject, body, and multiple recipients (`-t` / `--to-email`).
+- **CC and BCC Support**: Carbon copy (`--cc`) and blind carbon copy (`--bcc`) recipients.
+- **Friendly Sender Name**: Custom display names for the sender (`-fn` / `--from-name`).
+- **Advanced Attachment Engine**:
+  - Comma-separated attachments (`-af` / `--attachments`).
+  - Attachment List Files (`-lst-af` / `--attachments-list`).
+  - Directory Scanning (`-dir-af` / `--attachments-dir`).
+  - Max Attachment Total Size Guard (`-max-af` / `--max-attachment-size`).
+  - Inline Embedded Images (`-ia` / `--inline-attachments`).
+- **Recipient List Files**: Read recipient addresses from a list file (`-lst` / `--list`).
+- **Custom MIME Headers**: Specify arbitrary headers like `X-Job-ID` (`-H` / `--header`).
+- **Pre-Flight Gateway Diagnostics**: Test SMTP connectivity, latency timing, DNS MX/SPF/DMARC, ESMTP extensions, and X.509 TLS certificate chain inspection (`-info` / `--diag`, `--print-certs`).
+- **SASL Authentication Suite**: Support for `PLAIN`, `LOGIN`, `CRAM-MD5`, and `XOAUTH2` authentication (`--auth-type`, `--oauth2`, `--token`).
+- **Mail Provider Presets**: Built-in host/port/TLS presets (`--use office365|googleworkspace|aws-ses|sendgrid|mailgun|gmail|outlook`).
+- **Observability Output Formats**: Human text, Indented JSON (`-j`), and Single-Line NDJSON (`--ndjson`) for streaming log collectors.
+- **Execution Audit Log File**: Append timestamped logs directly to a file (`-log` / `--log-file`).
+- **Automatic Retries & Timeouts**: Retries on transient dial failures (`-retry` / `--retries`) with configurable delays (`--retry-delay`) and timeouts (`--timeout`).
+- **Environment Variable Secrets**: Automatic credential fallback via `MAILXGO_SMTP_PASSWORD` / `SMTP_USER_PASS` and `MAILXGO_SMTP_USERNAME` / `SMTP_USER`.
+- **Delivery Status Notifications (DSN)**: Request delivery status notifications (`--dsn-notify`, `--dsn-return`).
+- **Email Priority / Importance**: Set message importance (`-imp` / `--importance high|normal|low`).
+- **Automatic Configuration File Detection**: Automatically searches for `~/.config/mailxgo/config.json` (or `~/.config/mail2go/config.json`).
+
+---
 
 ## Requirements
 
 - Go 1.22 or higher recommended (for build).
 - Access to an SMTP server for sending emails.
 
-## Installation
-
-1. Download the Linux amd64 binary with wget (more versions on [release](https://github.com/KeepSec-Technologies/Mail2Go/releases/tag/1.2.0) tab):
-
-    ```shell
-    wget https://github.com/KeepSec-Technologies/Mail2Go/releases/download/1.2.0/mail2go_linux_amd64_1.2.0.tar.gz
-    ```
-
-2. Unpack it with tar
-
-    ```shell
-    tar -xf mail2go_linux_amd64_1.2.0.tar.gz
-    ```
-
-3. Move it to your /usr/local/bin/ (Optional):
-
-    ```shell
-    sudo mv mail2go /usr/local/bin/mail2go
-    ```
+---
 
 ## Building from Source
 
-1. Ensure you have Go installed on your system. You can download Go from [here](https://go.dev/dl/).
-2. Clone the repository:
+1. Clone the repository:
+   ```shell
+   git clone https://github.com/edsilegxrepo/mailxgo
+   cd mailxgo
+   ```
 
-    ```shell
-    git clone https://github.com/KeepSec-Technologies/Mail2Go
-    ```
+2. Build the `mailxgo` CLI binary:
+   ```shell
+   go build -v -o ./bin/mailxgo ./cmd/mailxgo
+   ```
 
-3. Navigate to the cloned directory:
+3. Move the binary to `/usr/local/bin/` (Optional):
+   ```shell
+   sudo mv ./bin/mailxgo /usr/local/bin/mailxgo
+   ```
 
-    ```shell
-    cd Mail2Go
-    ```
+---
 
-4. Build the tool:
+## Programmatic Go Library
 
-    ```shell
-    CGO_ENABLED=0 go build -a -installsuffix cgo -o mail2go .
-    ```
+External Go applications can import `mailxgo` directly:
 
-## Usage
+```go
+package main
 
-Run the Mail2Go tool with the required arguments:
+import (
+	"fmt"
+	"log"
 
-```text
--s, --smtp-server         SMTP server for sending emails
--p, --smtp-port           SMTP server port (Default: 587)
--u, --smtp-username       Username for SMTP authentication
--w, --smtp-password       Password for SMTP authentication
--na, --no-auth            No authentication required
--l, --tls-mode            TLS mode (none, tls-skip, tls)
--f, --from-email          Email address to send from
+	mailxgo "github.com/edsilegxrepo/mailxgo"
+)
 
--c, --config              Path to the SMTP json config file which replaces the above arguments
+func main() {
+	// Pre-Flight Gateway Probe
+	probeParams := mailxgo.EmailParams{
+		SMTPServer: "smtp.office365.com",
+		SMTPPort:   587,
+		TLSMode:    "tls",
+	}
+	report, err := mailxgo.RunDiagnostics(probeParams, true)
+	if err != nil {
+		log.Fatalf("Probe failed: %v", err)
+	}
+	fmt.Printf("Gateway Latency: %.2f ms\n", report.Latency.TotalMS)
 
--t, --to-email            Email addresses that will receive the email, comma-separated
--r, --reply-to            Email address to reply to (optional)
--h, --subject             Subject of the email
--b, --body                Body of the email
--af, --attachments        File paths for attachments, comma-separated (optional)
--bf, --body-file          File path for HTML email body (replaces the --body argument)
--v, --version             Application version
-```
-
-## Examples
-
-```shell
-# Basic example:
-mail2go -s mail.example.com -p 587 -u user@example.com -w password123 -l tls -f mail2go@example.com -t admin@example.com -h 'Test Mail2Go Subject' -b 'This is a body!' 
-
-# Example with two recipients, the body from an HTML file and two attached files (can be more):
-mail2go -s mail.example.com -p 587  -u user@example.com -w password123 -l tls -f mail2go@example.com -t admin@example.com,other@example.com -h 'Test Mail2Go Subject' -bf demo/body.html -af README.md,demo/mail2go-smaller.png
-
-# Example with a reply-to address:
-mail2go -s mail.example.com -p 587 -u user@example.com -w password123 -l tls -f mail2go@example.com -t admin@example.com -r replytome@example.com -h 'Test Mail2Go Subject' -b 'This is a body!'
-
-# Example without authentication and no TLS:
-mail2go -s mail.example.com -p 25 -l none -f mail2go@example.com -t admin@example.com -h 'Test Mail2Go Subject' -b 'This is a body!' 
-
-# Example of a local SMTP server with a TLS certificate that can't be verified:
-mail2go -s localhost -p 587 -u user@example.com -w password123 -l tls-skip -f mail2go@example.com -t admin@example.com -h 'Test Mail2Go Subject' -b 'This is a body!' 
-```
-
-Example of json configuration file to pass to Mail2Go:
-
-```json
-{
-    "smtp_server": "mail.example.com",
-    "smtp_port": 587,
-    "smtp_username": "user@example.com",
-    "smtp_password": "password_example",
-    "no_auth": false,
-    "tls_mode": "tls",
-    "from_email": "mail2go@example.com"
+	// Send Email
+	emailParams := mailxgo.EmailParams{
+		SMTPServer: "smtp.office365.com",
+		SMTPPort:   587,
+		Username:   "mft@company.com",
+		Password:   "SecretPass123",
+		From:       "mft@company.com",
+		To:         []string{"admin@company.com"},
+		Subject:    "Automated Report",
+		Body:       "Transfer complete.",
+	}
+	result, err := mailxgo.SendEmail(emailParams)
+	if err != nil {
+		log.Fatalf("Dispatch failed: %v", err)
+	}
+	fmt.Printf("Status: %s (Attempts: %d)\n", result.Status, result.Attempts)
 }
 ```
 
-Example of the command that goes with it:
+---
 
-```shell
-mail2go -c demo/config.json -t admin@example.com -h 'Test Mail2Go Subject' -b 'This is a body!' 
+## Usage
+
+```text
+Usage: mailxgo [options]
+
+  -s, --smtp-server         SMTP server for sending emails
+  -p, --smtp-port           SMTP server port (Default: 587)
+  -u, --smtp-username       Username for SMTP authentication
+  -w, --smtp-password       Password for SMTP authentication
+  --use                     Mail provider preset (office365, googleworkspace, aws-ses, sendgrid, mailgun, gmail, etc.)
+  --auth-type               SASL Auth mechanism (auto, login, plain, cram-md5, xoauth2)
+  --oauth2                  Enable XOAUTH2 authentication mode
+  --token                   OAuth2 access token for XOAUTH2 authentication
+  -cs, --charset            Custom body character set (Default: UTF-8)
+
+  -c, --config              Path to the SMTP json config file which replaces the above arguments
+
+  -t, --to-email            Email addresses that will receive the email, comma-separated
+  --cc                      CC recipient email addresses, comma-separated (optional)
+  --bcc                     BCC recipient email addresses, comma-separated (optional)
+  -lst, --list              File path containing recipient email addresses, one per line (optional)
+  -r, --reply-to            Email address to reply to (optional)
+  -h, --subject             Subject of the email
+  -b, --body                Body of the email
+  -af, --attachments        File paths for attachments, comma-separated (optional)
+  -lst-af, --attachments-list File path containing attachment file paths, one per line (optional)
+  -dir-af, --attachments-dir Directory path to attach all contained files (optional)
+  -max-af, --max-attachment-size Maximum total combined attachment size limit in MB (optional)
+  -ia, --inline-attachments File paths for inline attachments, comma-separated (optional)
+  -bf, --body-file          File path for HTML email body (replaces the --body argument)
+  -H, --header              Custom MIME header in 'Header-Name: Value' format (repeatable)
+  -log, --log-file          File path to append execution logs (optional)
+  -retry, --retries         Number of retries on SMTP dial failure (Default: 0)
+  --retry-delay             Delay in seconds between retries (Default: 5)
+  --timeout                 SMTP connection timeout in seconds (Default: 30)
+  --dsn-notify              DSN notification options comma-separated (SUCCESS, FAILURE, DELAY, NEVER)
+  --dsn-return              DSN return header option (FULL or HDRS)
+  -imp, --importance        Email priority/importance (high, normal, low)
+  -j, --json-output         Output result in machine-readable JSON format
+  --ndjson, --ndjson-output Output result in single-line NDJSON format
+  -info, --diag             Run pre-flight SMTP gateway diagnostics and exit
+  --print-certs             Print full TLS certificate chain during diagnostics
+  --debug                   Enable verbose SMTP protocol wire debug tracing
+  -v, --version             Application version
 ```
 
-If you are using the default configuration file at `~/.config/mail2go/config.json` it would look like this:
+---
 
-```shell
-mail2go -t admin@example.com -h 'Test Mail2Go Subject' -b 'This is a body!' 
-```
+## Environment Variables
 
-**Note:** CLI arguments will override configuration files (from the `--config` argument or the default location at `~/.config/mail2go/config.json`).
+- `MAILXGO_SMTP_PASSWORD` / `MAIL2GO_SMTP_PASSWORD` / `SMTP_USER_PASS`: Password for SMTP authentication.
+- `MAILXGO_SMTP_USERNAME` / `MAIL2GO_SMTP_USERNAME` / `SMTP_USER`: Username for SMTP authentication.
+- `MAILXGO_OAUTH_TOKEN` / `MAIL2GO_OAUTH_TOKEN` / `SMTP_OAUTH_TOKEN`: OAuth2 access token for XOAUTH2 authentication.
 
-## Contributing
-
-Contributions to Mail2Go are welcome. Please fork the repository and submit a pull request with your changes or improvements.
+---
 
 ## License
 
-This project is licensed under MIT - see the LICENSE file for details.
+This project is licensed under the MIT License - see the [LICENSE](./LICENSE) file for details.
