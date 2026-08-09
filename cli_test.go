@@ -121,12 +121,7 @@ func TestRunCLI_Version(t *testing.T) {
 	_, cleanup := mockExit(t)
 	defer cleanup()
 
-	code, panicked := runCLIWithCatch([]string{"-v"})
-	if !panicked || code != ExitSuccess {
-		t.Errorf("RunCLI(-v) code = %d, panicked = %v, want code %d", code, panicked, ExitSuccess)
-	}
-
-	code, panicked = runCLIWithCatch([]string{"--version"})
+	code, panicked := runCLIWithCatch([]string{"--version"})
 	if !panicked || code != ExitSuccess {
 		t.Errorf("RunCLI(--version) code = %d, panicked = %v, want code %d", code, panicked, ExitSuccess)
 	}
@@ -146,7 +141,7 @@ func TestRunCLI_MissingRequiredArgs(t *testing.T) {
 	_, cleanup := mockExit(t)
 	defer cleanup()
 
-	code, panicked := runCLIWithCatch([]string{"-s", "smtp.example.com"})
+	code, panicked := runCLIWithCatch([]string{"--smtp-server", "smtp.example.com"})
 	if !panicked || code != ExitErrUsage {
 		t.Errorf("RunCLI missing args code = %d, panicked = %v, want code %d", code, panicked, ExitErrUsage)
 	}
@@ -174,7 +169,7 @@ func TestRunCLI_ConfigAndPresets(t *testing.T) {
 		t.Fatalf("failed to write config file: %v", err)
 	}
 
-	code, _ := runCLIWithCatch([]string{"-c", configFile})
+	code, _ := runCLIWithCatch([]string{"--config", configFile})
 	if code != ExitSuccess {
 		t.Errorf("RunCLI config file test code = %d, want %d", code, ExitSuccess)
 	}
@@ -184,7 +179,7 @@ func TestRunCLI_ConfigAndPresets(t *testing.T) {
 	if err := os.WriteFile(invalidConfig, []byte("{bad-json"), 0o644); err != nil {
 		t.Fatalf("failed to write invalid config file: %v", err)
 	}
-	code, panicked := runCLIWithCatch([]string{"-c", invalidConfig})
+	code, panicked := runCLIWithCatch([]string{"--config", invalidConfig})
 	if !panicked || code != ExitErrConfig {
 		t.Errorf("RunCLI invalid config test code = %d, want %d", code, ExitErrConfig)
 	}
@@ -220,7 +215,7 @@ func TestRunCLI_PrecedenceOrder(t *testing.T) {
 	t.Setenv("MAILXGO_SMTP_PASSWORD", "env_pass")
 
 	// Env should override Config file
-	code, _ := runCLIWithCatch([]string{"-c", configFile})
+	code, _ := runCLIWithCatch([]string{"--config", configFile})
 	if code != ExitSuccess {
 		t.Errorf("RunCLI precedence test code = %d, want %d", code, ExitSuccess)
 	}
@@ -250,7 +245,7 @@ func TestRunCLI_Diagnostics(t *testing.T) {
 	}
 
 	// Diag with server fails on dial error
-	code, panicked = runCLIWithCatch([]string{"--info", "-s", "smtp.example.com"})
+	code, panicked = runCLIWithCatch([]string{"--info", "--smtp-server", "smtp.example.com"})
 	if !panicked || code != ExitErrDNS {
 		t.Errorf("RunCLI info dial error code = %d, want %d", code, ExitErrDNS)
 	}
@@ -289,31 +284,31 @@ func TestRunCLI_FullDispatch(t *testing.T) {
 
 	args := []string{
 		"--use", "gmail",
-		"-u", "user",
-		"-w", "pass",
-		"-f", "sender@example.com",
-		"-fn", "Sender Name",
-		"-t", "to@example.com",
-		"-cc", "cc@example.com",
-		"-bcc", "bcc@example.com",
-		"-lst", listFile,
-		"-r", "reply@example.com",
-		"-h", "Test Subject",
-		"-bf", bodyFile,
-		"-af", att2,
-		"-lst-af", attListFile,
-		"-dir-af", attDir,
-		"-max-af", "10",
-		"-ia", att1,
-		"-H", "X-Header-1: Value1",
-		"-H", "X-Header-2: Value2",
-		"-retry", "1",
+		"--smtp-username", "user",
+		"--smtp-password", "pass",
+		"--from-email", "sender@example.com",
+		"--from-name", "Sender Name",
+		"--to-email", "to@example.com",
+		"--cc", "cc@example.com",
+		"--bcc", "bcc@example.com",
+		"--list", listFile,
+		"--reply-to", "reply@example.com",
+		"--subject", "Test Subject",
+		"--body-file", bodyFile,
+		"--attachments", att2,
+		"--attachments-list", attListFile,
+		"--attachments-dir", attDir,
+		"--max-attachment-size", "10",
+		"--inline-attachments", att1,
+		"--header", "X-Header-1: Value1",
+		"--header", "X-Header-2: Value2",
+		"--retries", "1",
 		"--retry-delay", "1",
 		"--timeout", "10",
 		"--dsn-notify", "SUCCESS,FAILURE",
 		"--dsn-return", "FULL",
-		"-imp", "high",
-		"-j",
+		"--importance", "high",
+		"--json-output",
 	}
 
 	code, _ := runCLIWithCatch(args)
@@ -323,11 +318,11 @@ func TestRunCLI_FullDispatch(t *testing.T) {
 
 	// Missing list file error
 	badListArgs := []string{
-		"-s", "smtp.example.com",
-		"-f", "sender@example.com",
-		"-lst", filepath.Join(tmpDir, "nonexistent.txt"),
-		"-h", "Subj",
-		"-b", "Body",
+		"--smtp-server", "smtp.example.com",
+		"--from-email", "sender@example.com",
+		"--list", filepath.Join(tmpDir, "nonexistent.txt"),
+		"--subject", "Subj",
+		"--body", "Body",
 	}
 	code, panicked := runCLIWithCatch(badListArgs)
 	if !panicked || code != ExitErrFileIO {
@@ -336,12 +331,12 @@ func TestRunCLI_FullDispatch(t *testing.T) {
 
 	// Missing attachment list file error
 	badAttListArgs := []string{
-		"-s", "smtp.example.com",
-		"-f", "sender@example.com",
-		"-t", "to@example.com",
-		"-lst-af", filepath.Join(tmpDir, "nonexistent_att.txt"),
-		"-h", "Subj",
-		"-b", "Body",
+		"--smtp-server", "smtp.example.com",
+		"--from-email", "sender@example.com",
+		"--to-email", "to@example.com",
+		"--attachments-list", filepath.Join(tmpDir, "nonexistent_att.txt"),
+		"--subject", "Subj",
+		"--body", "Body",
 	}
 	code, panicked = runCLIWithCatch(badAttListArgs)
 	if !panicked || code != ExitErrFileIO {
@@ -350,12 +345,12 @@ func TestRunCLI_FullDispatch(t *testing.T) {
 
 	// Missing attachment dir error
 	badAttDirArgs := []string{
-		"-s", "smtp.example.com",
-		"-f", "sender@example.com",
-		"-t", "to@example.com",
-		"-dir-af", filepath.Join(tmpDir, "nonexistent_dir"),
-		"-h", "Subj",
-		"-b", "Body",
+		"--smtp-server", "smtp.example.com",
+		"--from-email", "sender@example.com",
+		"--to-email", "to@example.com",
+		"--attachments-dir", filepath.Join(tmpDir, "nonexistent_dir"),
+		"--subject", "Subj",
+		"--body", "Body",
 	}
 	code, panicked = runCLIWithCatch(badAttDirArgs)
 	if !panicked || code != ExitErrFileIO {

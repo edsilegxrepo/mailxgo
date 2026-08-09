@@ -17,11 +17,14 @@ graph TD
 
     SubMailer --> SubUtil["Utility & File Scanner (./util.go)"]
     SubMailer --> SubConfig["Configuration Loader (./config.go)"]
+    SubMailer --> SubCrypto["Crypto & TLS Security (./crypto.go)"]
     SubDiag --> SubUtil
     SubDiag --> SubConfig
+    SubDiag --> SubCrypto
     SubMailer --> SubExit["Exit Code Definitions (./exitcodes.go)"]
 
     SubMailer --> ExtMail["github.com/wneessen/go-mail v0.4.0"]
+    SubCrypto --> ExtSecProt["github.com/edsilegxrepo/secretprotector"]
     SubDiag --> NetGo["net / net/smtp / crypto/tls"]
 ```
 
@@ -114,6 +117,7 @@ sequenceDiagram
 ```mermaid
 graph LR
     mailxgo["mailxgo (package mailxgo)"] --> GoMail["github.com/wneessen/go-mail v0.4.0"]
+    mailxgo --> SecProt["github.com/edsilegxrepo/secretprotector"]
     mailxgo --> StandardNet["net (Go Standard Library)"]
     mailxgo --> StandardSMTP["net/smtp (Go Standard Library)"]
     mailxgo --> StandardTLS["crypto/tls (Go Standard Library)"]
@@ -123,7 +127,8 @@ graph LR
 
 ### 4.2 Module Inventory
 * **Core Transport Engine:** `github.com/wneessen/go-mail v0.4.0` (Native Go ESMTP implementation, maintained, zero external indirect dependencies).
-* **Standard Library Dependencies:** `net`, `net/smtp`, `crypto/tls`, `encoding/json`, `os`, `bufio`, `path/filepath`, `strings`, `flag`, `fmt`, `sort`, `strconv`, `time`.
+* **Secret Management:** `github.com/edsilegxrepo/secretprotector` (AES-256-GCM credential encryption/decryption).
+* **Standard Library Dependencies:** `net`, `net/smtp`, `crypto/tls`, `crypto/sha256`, `crypto/x509`, `encoding/json`, `encoding/hex`, `os`, `bufio`, `path/filepath`, `strings`, `flag`, `fmt`, `sort`, `strconv`, `time`.
 
 ---
 
@@ -137,8 +142,8 @@ graph TD
     Validation --> TransportSecurity{"TLS Transport Policy"}
 
     TransportSecurity -- "tls (Default)" --> StrictTLS["Mandatory TLS / SMTPS (Port 465/587)"]
-    TransportSecurity -- "tls-skip" --> InsecureTLS["Explicit TLS (Skip Cert Verification)"]
-    TransportSecurity -- "none" --> NoTLS["Cleartext SMTPS Relay"]
+    TransportSecurity -- "ignore-trust" --> InsecureTLS["Explicit TLS (Skip Cert Verification)"]
+    TransportSecurity -- "none" --> NoTLS["Cleartext SMTP Relay"]
 
     StrictTLS --> SASLAuth{"SASL Authentication Layer"}
     InsecureTLS --> SASLAuth
@@ -162,4 +167,7 @@ graph TD
 ### 5.2 Access Control & Privilege Management
 * **Unprivileged Execution Context:** `mailxgo` requires no superuser or root privileges. It runs entirely within standard unprivileged user spaces (`uid/gid`).
 * **Secret Isolation:** Cleartext passwords and OAuth access tokens can be passed via environment variables (`MAILXGO_SMTP_PASSWORD`, `MAILXGO_OAUTH_TOKEN`) or process pipes to avoid exposure in process listing tables (`ps aux`).
+* **Encrypted Credentials:** Passwords and tokens with the `v1:gcm:` prefix are automatically decrypted using AES-256-GCM via the secretprotector library. Master key is read from `SECRETPROTECTOR_MASTER_KEY`.
+* **Certificate Pinning:** TLS fingerprint pinning (`--tls-fingerprint`) allows secure connections to servers with self-signed or private CA certificates without disabling verification.
+* **Custom Trust Stores:** Custom CA certificates can be loaded from files (`--tls-ca-cert`) or directories (`--tls-ca-dir`) for private PKI environments.
 * **Input Sanitization:** MIME header injection protection prevents injection of CRLF sequences (`\r\n`) in header fields.

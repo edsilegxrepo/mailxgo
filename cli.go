@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	Version = "dev" // Application version
+	version = "dev" // Application version (set via -ldflags "-X mailxgo.version=x.y.z")
 	osExit  = os.Exit
 )
 
@@ -31,11 +31,18 @@ var (
 type HeaderFlags map[string]string
 
 func (h *HeaderFlags) String() string {
-	var parts []string
+	var sb strings.Builder
+	first := true
 	for k, v := range *h {
-		parts = append(parts, fmt.Sprintf("%s:%s", k, v))
+		if !first {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(k)
+		sb.WriteByte(':')
+		sb.WriteString(v)
+		first = false
 	}
-	return strings.Join(parts, ", ")
+	return sb.String()
 }
 
 // Set validates and stores custom MIME header key-value pairs.
@@ -64,52 +71,74 @@ func (h *HeaderFlags) Set(value string) error {
 func PrintUsage() {
 	fmt.Fprintf(os.Stderr, "Usage: %s [options]\n", os.Args[0])
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "  -s, --smtp-server         SMTP server for sending emails")
-	fmt.Fprintln(os.Stderr, "  -p, --smtp-port           SMTP server port (Default: 587)")
-	fmt.Fprintln(os.Stderr, "  -u, --smtp-username       Username for SMTP authentication")
-	fmt.Fprintln(os.Stderr, "  -w, --smtp-password       Password for SMTP authentication")
-	fmt.Fprintln(os.Stderr, "  --use                     Mail provider preset (office365, googleworkspace, aws-ses, sendgrid, mailgun, gmail, etc.)")
-	fmt.Fprintln(os.Stderr, "  --auth-type               SASL Auth mechanism (auto, login, plain, cram-md5, xoauth2)")
+	fmt.Fprintln(os.Stderr, "Connection:")
+	fmt.Fprintln(os.Stderr, "  --smtp-server             SMTP server for sending emails")
+	fmt.Fprintln(os.Stderr, "  --smtp-port               SMTP server port (Default: 587)")
+	fmt.Fprintln(os.Stderr, "  --smtp-username           Username for SMTP authentication")
+	fmt.Fprintln(os.Stderr, "  --smtp-password           Password for SMTP authentication")
+	fmt.Fprintln(os.Stderr, "  --no-auth                 Use unauthenticated SMTP relay")
+	fmt.Fprintln(os.Stderr, "  --tls-mode                TLS mode: tls, ignore-trust, none (Default: tls)")
+	fmt.Fprintln(os.Stderr, "  --tls-ca-cert             Path to CA certificate file (PEM) for custom trust")
+	fmt.Fprintln(os.Stderr, "  --tls-ca-dir              Path to directory containing CA certificates (PEM)")
+	fmt.Fprintln(os.Stderr, "  --tls-fingerprint         SHA256 fingerprint for certificate pinning (hex, with or without colons)")
+	fmt.Fprintln(os.Stderr, "  --use                     Mail provider preset (office365, googleworkspace, aws-ses, sendgrid, mailgun, gmail)")
+	fmt.Fprintln(os.Stderr, "  --auth-type               SASL Auth mechanism: auto, login, plain, cram-md5, xoauth2 (Default: auto)")
 	fmt.Fprintln(os.Stderr, "  --oauth2                  Enable XOAUTH2 authentication mode")
 	fmt.Fprintln(os.Stderr, "  --token                   OAuth2 access token for XOAUTH2 authentication")
-	fmt.Fprintln(os.Stderr, "  -cs, --charset            Custom body character set (Default: UTF-8)")
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "  -c, --config              Path to the SMTP json config file which replaces the above arguments")
+	fmt.Fprintln(os.Stderr, "Configuration:")
+	fmt.Fprintln(os.Stderr, "  --config                  Path to JSON config file")
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "  -t, --to-email            Email addresses that will receive the email, comma-separated")
-	fmt.Fprintln(os.Stderr, "  --cc                      CC recipient email addresses, comma-separated (optional)")
-	fmt.Fprintln(os.Stderr, "  --bcc                     BCC recipient email addresses, comma-separated (optional)")
-	fmt.Fprintln(os.Stderr, "  -lst, --list              File path containing recipient email addresses, one per line (optional)")
-	fmt.Fprintln(os.Stderr, "  -r, --reply-to            Email address to reply to (optional)")
-	fmt.Fprintln(os.Stderr, "  -h, --subject             Subject of the email")
-	fmt.Fprintln(os.Stderr, "  -b, --body                Body of the email")
-	fmt.Fprintln(os.Stderr, "  -af, --attachments        File paths for attachments, comma-separated (optional)")
-	fmt.Fprintln(os.Stderr, "  -lst-af, --attachments-list File path containing attachment file paths, one per line (optional)")
-	fmt.Fprintln(os.Stderr, "  -dir-af, --attachments-dir Directory path to attach all contained files (optional)")
-	fmt.Fprintln(os.Stderr, "  -max-af, --max-attachment-size Maximum total combined attachment size limit in MB (optional)")
-	fmt.Fprintln(os.Stderr, "  -ia, --inline-attachments File paths for inline attachments, comma-separated (optional)")
-	fmt.Fprintln(os.Stderr, "  -bf, --body-file          File path for HTML email body (replaces the --body argument)")
-	fmt.Fprintln(os.Stderr, "  -H, --header              Custom MIME header in 'Header-Name: Value' format (repeatable)")
-	fmt.Fprintln(os.Stderr, "  -log, --log-file          File path to append execution logs (optional)")
-	fmt.Fprintln(os.Stderr, "  -retry, --retries         Number of retries on SMTP dial failure (Default: 0)")
-	fmt.Fprintln(os.Stderr, "  --retry-delay             Delay in seconds between retries (Default: 5)")
-	fmt.Fprintln(os.Stderr, "  --timeout                 SMTP connection timeout in seconds (Default: 30)")
-	fmt.Fprintln(os.Stderr, "  --dsn-notify              DSN notification options comma-separated (SUCCESS, FAILURE, DELAY, NEVER)")
-	fmt.Fprintln(os.Stderr, "  --dsn-return              DSN return header option (FULL or HDRS)")
-	fmt.Fprintln(os.Stderr, "  -imp, --importance        Email priority/importance (high, normal, low)")
-	fmt.Fprintln(os.Stderr, "  -j, --json-output         Output result in machine-readable JSON format")
-	fmt.Fprintln(os.Stderr, "  --ndjson, --ndjson-output Output result in single-line NDJSON format")
-	fmt.Fprintln(os.Stderr, "  -info, --diag             Run pre-flight SMTP gateway diagnostics and exit")
-	fmt.Fprintln(os.Stderr, "  --print-certs             Print full TLS certificate chain during diagnostics")
-	fmt.Fprintln(os.Stderr, "  --debug                   Enable verbose SMTP protocol wire debug tracing")
-	fmt.Fprintln(os.Stderr, "  -v, --version             Application version")
+	fmt.Fprintln(os.Stderr, "Message:")
+	fmt.Fprintln(os.Stderr, "  --from-email              Sender email address")
+	fmt.Fprintln(os.Stderr, "  --from-name               Sender display name")
+	fmt.Fprintln(os.Stderr, "  --to-email                Recipient email addresses, comma-separated")
+	fmt.Fprintln(os.Stderr, "  --cc                      CC recipient email addresses, comma-separated")
+	fmt.Fprintln(os.Stderr, "  --bcc                     BCC recipient email addresses, comma-separated")
+	fmt.Fprintln(os.Stderr, "  --list                    File path containing recipient addresses, one per line")
+	fmt.Fprintln(os.Stderr, "  --reply-to                Reply-To email address")
+	fmt.Fprintln(os.Stderr, "  --subject                 Email subject line")
+	fmt.Fprintln(os.Stderr, "  --body                    Email body text")
+	fmt.Fprintln(os.Stderr, "  --body-file               File path for HTML email body")
+	fmt.Fprintln(os.Stderr, "  --charset                 Body character set (Default: UTF-8)")
+	fmt.Fprintln(os.Stderr, "  --importance              Email priority: high, normal, low")
+	fmt.Fprintln(os.Stderr, "  --header                  Custom MIME header 'Name: Value' (repeatable)")
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "  Ensure all required flags are provided.")
+	fmt.Fprintln(os.Stderr, "Attachments:")
+	fmt.Fprintln(os.Stderr, "  --attachments             File paths for attachments, comma-separated")
+	fmt.Fprintln(os.Stderr, "  --attachments-list        File containing attachment paths, one per line")
+	fmt.Fprintln(os.Stderr, "  --attachments-dir         Directory to attach all files from")
+	fmt.Fprintln(os.Stderr, "  --inline-attachments      File paths for inline attachments, comma-separated")
+	fmt.Fprintln(os.Stderr, "  --max-attachment-size     Maximum total attachment size in MB")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Delivery:")
+	fmt.Fprintln(os.Stderr, "  --retries                 Number of retries on SMTP failure (Default: 0)")
+	fmt.Fprintln(os.Stderr, "  --retry-delay             Delay between retries in seconds (Default: 5)")
+	fmt.Fprintln(os.Stderr, "  --timeout                 Connection timeout in seconds (Default: 30)")
+	fmt.Fprintln(os.Stderr, "  --dsn-notify              DSN notification: SUCCESS, FAILURE, DELAY, NEVER")
+	fmt.Fprintln(os.Stderr, "  --dsn-return              DSN return: FULL or HDRS")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Output:")
+	fmt.Fprintln(os.Stderr, "  --json-output             Output result in JSON format")
+	fmt.Fprintln(os.Stderr, "  --ndjson-output           Output result in single-line NDJSON format")
+	fmt.Fprintln(os.Stderr, "  --log-file                File path to append execution logs")
+	fmt.Fprintln(os.Stderr, "  --no-log-recipients       Redact recipient addresses in logs (GDPR/privacy)")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Diagnostics:")
+	fmt.Fprintln(os.Stderr, "  --diag                    Run pre-flight SMTP gateway diagnostics")
+	fmt.Fprintln(os.Stderr, "  --print-certs             Print TLS certificate chain during diagnostics")
+	fmt.Fprintln(os.Stderr, "  --debug                   Enable verbose SMTP protocol tracing")
+	fmt.Fprintln(os.Stderr, "  --version                 Display application version")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Environment Variables:")
+	fmt.Fprintln(os.Stderr, "  MAILXGO_SMTP_PASSWORD     SMTP password (recommended over --smtp-password)")
+	fmt.Fprintln(os.Stderr, "  MAILXGO_SMTP_USERNAME     SMTP username")
+	fmt.Fprintln(os.Stderr, "  MAILXGO_OAUTH_TOKEN       OAuth2 access token")
 }
 
 // RunCLI parses command-line arguments and executes Mail2Go diagnostics or email dispatch.
 func RunCLI(args []string) {
-	fs := flag.NewFlagSet("mail2go", flag.ContinueOnError)
+	fs := flag.NewFlagSet("mailxgo", flag.ContinueOnError)
 
 	var (
 		smtpServer string
@@ -123,7 +152,10 @@ func RunCLI(args []string) {
 		useProvider string
 		charset     string
 
-		tlsMode string
+		tlsMode        string
+		tlsCACert      string
+		tlsCADir       string
+		tlsFingerprint string
 
 		configFile string
 
@@ -144,8 +176,9 @@ func RunCLI(args []string) {
 		attachmentsDir         string
 		maxAttachmentMB        int
 
-		bodyFile string
-		logFile  string
+		bodyFile        string
+		logFile         string
+		noLogRecipients bool
 
 		retries    int
 		retryDelay int
@@ -165,49 +198,7 @@ func RunCLI(args []string) {
 		headers = make(HeaderFlags)
 
 		showVersion bool
-
-		// Short-form flags
-		smtpServerShort string
-		smtpPortShort   int
-		usernameShort   string
-		passwordShort   string
-
 		noAuth      bool
-		noAuthShort bool
-
-		useProviderShort string
-		charsetShort     string
-
-		attachmentsListShort string
-		attachmentsDirShort  string
-		maxAttachmentMBShort int
-
-		tlsModeShort string
-
-		configFileShort string
-
-		fromEmailShort string
-		fromNameShort  string
-		toEmailShort   string
-		ccEmailShort   string
-		bccEmailShort  string
-		listFileShort  string
-		replyToShort   string
-
-		subjectShort string
-		bodyShort    string
-
-		attachmentsFilesShort       string
-		inlineAttachmentsFilesShort string
-		bodyFileShort               string
-		logFileShort                string
-
-		retriesShort      int
-		importanceShort   string
-		jsonOutputShort   bool
-		ndjsonOutputShort bool
-		infoShort         bool
-		showVersionShort  bool
 	)
 
 	// Long-form flags
@@ -223,7 +214,10 @@ func RunCLI(args []string) {
 	fs.StringVar(&useProvider, "use", "", "Mail provider preset (office365, googleworkspace, aws-ses, sendgrid, mailgun, gmail, etc.)")
 	fs.StringVar(&charset, "charset", "", "Custom body character set (default UTF-8)")
 
-	fs.StringVar(&tlsMode, "tls-mode", "", "TLS mode (none, tls-skip, tls) (default tls)")
+	fs.StringVar(&tlsMode, "tls-mode", "", "TLS mode (none, ignore-trust, tls) (default tls)")
+	fs.StringVar(&tlsCACert, "tls-ca-cert", "", "Path to CA certificate file (PEM) for custom trust")
+	fs.StringVar(&tlsCADir, "tls-ca-dir", "", "Path to directory containing CA certificates (PEM)")
+	fs.StringVar(&tlsFingerprint, "tls-fingerprint", "", "SHA256 fingerprint for certificate pinning (hex)")
 
 	fs.StringVar(&configFile, "config", "", "Path to the SMTP config file")
 
@@ -246,6 +240,7 @@ func RunCLI(args []string) {
 
 	fs.StringVar(&bodyFile, "body-file", "", "File path for email body")
 	fs.StringVar(&logFile, "log-file", "", "File path to append execution logs")
+	fs.BoolVar(&noLogRecipients, "no-log-recipients", false, "Redact recipient addresses in log files (GDPR/privacy)")
 
 	fs.IntVar(&retries, "retries", 0, "Number of retries on SMTP dial failure (default 0)")
 	fs.IntVar(&retryDelay, "retry-delay", 5, "Delay in seconds between retries (default 5)")
@@ -269,63 +264,17 @@ func RunCLI(args []string) {
 
 	fs.BoolVar(&showVersion, "version", false, "Display application version")
 
-	// Short-form flags
-	fs.StringVar(&smtpServerShort, "s", "", "SMTP server for sending emails (short)")
-	fs.IntVar(&smtpPortShort, "p", 0, "SMTP server port (short)")
-	fs.StringVar(&usernameShort, "u", "", "Username for SMTP authentication (short)")
-	fs.StringVar(&passwordShort, "w", "", "Password for SMTP authentication (short)")
-	fs.BoolVar(&noAuthShort, "na", false, "Use unauthenticated SMTP (short)")
-
-	fs.StringVar(&useProviderShort, "use-short", "", "Mail provider preset (short)")
-	fs.StringVar(&charsetShort, "cs", "", "Custom body character set (short)")
-
-	fs.StringVar(&attachmentsListShort, "lst-af", "", "File path containing attachment file paths (short)")
-	fs.StringVar(&attachmentsDirShort, "dir-af", "", "Directory path to attach all contained files (short)")
-	fs.IntVar(&maxAttachmentMBShort, "max-af", 0, "Maximum total attachment size limit in MB (short)")
-
-	fs.StringVar(&tlsModeShort, "l", "", "TLS mode (short)")
-
-	fs.StringVar(&configFileShort, "c", "", "Path to the SMTP config file (short)")
-
-	fs.StringVar(&fromEmailShort, "f", "", "Email address to send from (short)")
-	fs.StringVar(&fromNameShort, "fn", "", "Friendly sender display name (short)")
-	fs.StringVar(&toEmailShort, "t", "", "Email addresses that will receive the email, comma-separated (short)")
-	fs.StringVar(&ccEmailShort, "cc-short", "", "CC recipient email addresses (short)")
-	fs.StringVar(&bccEmailShort, "bcc-short", "", "BCC recipient email addresses (short)")
-	fs.StringVar(&listFileShort, "lst", "", "File path containing recipient email addresses (short)")
-	fs.StringVar(&replyToShort, "r", "", "Email address to reply to (short)")
-
-	fs.StringVar(&subjectShort, "h", "", "Subject of the email (short)")
-	fs.StringVar(&bodyShort, "b", "", "Body of the email (short)")
-
-	fs.StringVar(&attachmentsFilesShort, "af", "", "File paths for attachments, comma-separated (short)")
-	fs.StringVar(&inlineAttachmentsFilesShort, "ia", "", "File paths for inline attachments, comma-separated (short)")
-	fs.StringVar(&bodyFileShort, "bf", "", "File path for email body (short)")
-	fs.StringVar(&logFileShort, "log", "", "File path to append execution logs (short)")
-
-	fs.IntVar(&retriesShort, "retry", 0, "Number of retries on SMTP dial failure (short)")
-	fs.StringVar(&importanceShort, "imp", "", "Email priority/importance (short)")
-	fs.BoolVar(&jsonOutputShort, "j", false, "Output result in machine-readable JSON format (short)")
-	fs.BoolVar(&ndjsonOutputShort, "ndjson-short", false, "Output result in single-line NDJSON format (short)")
-	fs.BoolVar(&infoShort, "info-short", false, "Run pre-flight SMTP gateway diagnostics and exit")
-
-	fs.Var(&headers, "H", "Custom MIME header in 'Header-Name: Value' format (short)")
-
-	fs.BoolVar(&showVersionShort, "v", false, "Display application version")
-
 	if err := fs.Parse(args); err != nil {
 		PrintUsage()
 		osExit(ExitErrUsage)
 		return
 	}
 
-	if showVersion || showVersionShort {
-		fmt.Printf("mailxgo Version: %s\n", Version)
+	if showVersion {
+		fmt.Printf("mailxgo version: %s\n", version)
 		osExit(ExitSuccess)
 		return
 	}
-
-	configFile = priorityString([]string{configFile, configFileShort})
 
 	if configFile == "" {
 		homeDir, err := os.UserHomeDir()
@@ -376,16 +325,16 @@ func RunCLI(args []string) {
 	}
 
 	// Priority: Config file < Environment variables < CLI flags (last element wins)
-	useProvider = priorityString([]string{config.Use, useProvider, useProviderShort})
+	useProvider = priorityString([]string{config.Use, useProvider})
 	if useProvider != "" {
 		if preset, ok := ResolveProviderPreset(useProvider); ok {
-			if smtpServer == "" && smtpServerShort == "" && config.SMTPServer == "" {
+			if smtpServer == "" && config.SMTPServer == "" {
 				smtpServer = preset.Host
 			}
-			if smtpPort == 0 && smtpPortShort == 0 && config.SMTPPort == 0 {
+			if smtpPort == 0 && config.SMTPPort == 0 {
 				smtpPort = preset.Port
 			}
-			if tlsMode == "" && tlsModeShort == "" && config.TLSMode == "" {
+			if tlsMode == "" && config.TLSMode == "" {
 				tlsMode = preset.TLSMode
 			}
 		} else {
@@ -393,62 +342,81 @@ func RunCLI(args []string) {
 		}
 	}
 
-	smtpServer = priorityString([]string{config.SMTPServer, smtpServer, smtpServerShort})
-	smtpPort = priorityInt([]int{config.SMTPPort, smtpPort, smtpPortShort})
+	smtpServer = priorityString([]string{config.SMTPServer, smtpServer})
+	smtpPort = priorityInt([]int{config.SMTPPort, smtpPort})
 	if smtpPort == 0 {
-		smtpPort = 587
+		smtpPort = DefaultSMTPPort
 	}
 
-	username = priorityString([]string{config.SMTPUsername, envUser, username, usernameShort})
-	password = priorityString([]string{config.SMTPPassword, envPass, password, passwordShort})
+	username = priorityString([]string{config.SMTPUsername, envUser, username})
+	password = priorityString([]string{config.SMTPPassword, envPass, password})
 	token = priorityString([]string{config.Token, envToken, token})
+
+	// Note: Encrypted secrets (v1:gcm: prefix) are decrypted in SendEmail automatically
 	authType = priorityString([]string{config.AuthType, authType})
 	oauth2Mode = config.OAuth2 || oauth2Mode
-	charset = priorityString([]string{config.Charset, charset, charsetShort})
+	charset = priorityString([]string{config.Charset, charset})
 
-	noAuth = config.NoAuth || noAuth || noAuthShort
+	noAuth = config.NoAuth || noAuth
 
-	tlsMode = priorityString([]string{config.TLSMode, tlsMode, tlsModeShort})
+	tlsMode = priorityString([]string{config.TLSMode, tlsMode})
 	if tlsMode == "" {
 		tlsMode = "tls"
 	}
+	tlsCACert = priorityString([]string{config.TLSCACert, tlsCACert})
+	tlsCADir = priorityString([]string{config.TLSCADir, tlsCADir})
+	tlsFingerprint = priorityString([]string{config.TLSFingerprint, tlsFingerprint})
 
-	fromEmail = priorityString([]string{config.FromEmail, fromEmail, fromEmailShort})
-	fromName = priorityString([]string{config.FromName, fromName, fromNameShort})
-	toEmail = priorityString([]string{config.ToEmail, toEmail, toEmailShort})
-	ccEmail = priorityString([]string{strings.Join(config.CC, ","), ccEmail, ccEmailShort})
-	bccEmail = priorityString([]string{strings.Join(config.BCC, ","), bccEmail, bccEmailShort})
-	listFile = priorityString([]string{listFile, listFileShort})
-	replyTo = priorityString([]string{replyTo, replyToShort})
+	// Validate fingerprint format if provided
+	if tlsFingerprint != "" {
+		if err := ValidateCertFingerprint(tlsFingerprint); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			osExit(ExitErrUsage)
+			return
+		}
+	}
 
-	subject = priorityString([]string{config.Subject, subject, subjectShort})
-	body = priorityString([]string{config.Body, body, bodyShort})
+	fromEmail = priorityString([]string{config.FromEmail, fromEmail})
+	fromName = priorityString([]string{config.FromName, fromName})
+	// Merge config.To array with config.ToEmail string
+	configToEmail := config.ToEmail
+	if len(config.To) > 0 {
+		configToEmail = strings.Join(config.To, ",")
+		if config.ToEmail != "" {
+			configToEmail = config.ToEmail + "," + configToEmail
+		}
+	}
+	toEmail = priorityString([]string{configToEmail, toEmail})
+	ccEmail = priorityString([]string{strings.Join(config.CC, ","), ccEmail})
+	bccEmail = priorityString([]string{strings.Join(config.BCC, ","), bccEmail})
 
-	attachmentsFiles = priorityString([]string{attachmentsFiles, attachmentsFilesShort})
-	inlineAttachmentsFiles = priorityString([]string{inlineAttachmentsFiles, inlineAttachmentsFilesShort})
-	attachmentsList = priorityString([]string{config.AttachmentsList, attachmentsList, attachmentsListShort})
-	attachmentsDir = priorityString([]string{config.AttachmentsDir, attachmentsDir, attachmentsDirShort})
-	maxAttachmentMB = priorityInt([]int{config.MaxAttachmentMB, maxAttachmentMB, maxAttachmentMBShort})
+	subject = priorityString([]string{config.Subject, subject})
+	body = priorityString([]string{config.Body, body})
 
-	bodyFile = priorityString([]string{config.BodyFile, bodyFile, bodyFileShort})
-	logFile = priorityString([]string{config.LogFile, logFile, logFileShort})
+	attachmentsList = priorityString([]string{config.AttachmentsList, attachmentsList})
+	attachmentsDir = priorityString([]string{config.AttachmentsDir, attachmentsDir})
+	maxAttachmentMB = priorityInt([]int{config.MaxAttachmentMB, maxAttachmentMB})
 
-	retries = priorityInt([]int{config.Retries, retries, retriesShort})
+	bodyFile = priorityString([]string{config.BodyFile, bodyFile})
+	noLogRecipients = config.NoLogRecipients || noLogRecipients
+	logFile = priorityString([]string{config.LogFile, logFile})
+
+	retries = priorityInt([]int{config.Retries, retries})
 	retryDelay = priorityInt([]int{config.RetryDelay, retryDelay})
 	if retryDelay <= 0 {
-		retryDelay = 5
+		retryDelay = DefaultRetryDelay
 	}
 	timeout = priorityInt([]int{config.Timeout, timeout})
 	if timeout <= 0 {
-		timeout = 30
+		timeout = DefaultTimeout
 	}
 
-	importance = priorityString([]string{config.Importance, importance, importanceShort})
+	importance = priorityString([]string{config.Importance, importance})
 	dsnReturn = priorityString([]string{config.DSNReturn, dsnReturn})
-	jsonOutput = config.JSONOutput || jsonOutput || jsonOutputShort
-	ndjsonOutput = config.NDJSONOutput || ndjsonOutput || ndjsonAlias || ndjsonOutputShort
+	jsonOutput = config.JSONOutput || jsonOutput
+	ndjsonOutput = config.NDJSONOutput || ndjsonOutput || ndjsonAlias
 	debug = config.Debug || debug
-	info = config.Info || info || infoShort || diag
+	info = config.Info || info || diag
 	printCerts = config.PrintCerts || printCerts
 
 	var dsnNotifyList []string
@@ -466,11 +434,14 @@ func RunCLI(args []string) {
 			return
 		}
 		diagParams := EmailParams{
-			SMTPServer:   smtpServer,
-			SMTPPort:     smtpPort,
-			From:         fromEmail,
-			TLSMode:      tlsMode,
-			Timeout:      timeout,
+			SMTPServer:     smtpServer,
+			SMTPPort:       smtpPort,
+			From:           fromEmail,
+			TLSMode:        tlsMode,
+			TLSCACert:      tlsCACert,
+			TLSCADir:       tlsCADir,
+			TLSFingerprint: tlsFingerprint,
+			Timeout:        timeout,
 			JSONOutput:   jsonOutput,
 			NDJSONOutput: ndjsonOutput,
 		}
@@ -570,6 +541,9 @@ func RunCLI(args []string) {
 		InlineAttachments: inlineAttachmentPaths,
 		Headers:           mergedHeaders,
 		TLSMode:           tlsMode,
+		TLSCACert:         tlsCACert,
+		TLSCADir:          tlsCADir,
+		TLSFingerprint:    tlsFingerprint,
 		NoAuth:            noAuth,
 		LogFile:           logFile,
 		Retries:           retries,
@@ -586,13 +560,29 @@ func RunCLI(args []string) {
 		Charset:           charset,
 		MaxAttachmentMB:   maxAttachmentMB,
 		NDJSONOutput:      ndjsonOutput,
+		NoLogRecipients:   noLogRecipients,
 	}
 
-	if _, err := SendEmail(params); err != nil {
+	result, err := SendEmail(params)
+	if err != nil {
 		if !jsonOutput && !ndjsonOutput {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 		}
-		osExit(ExitErrSend)
+		// Use granular exit codes based on error type
+		if result != nil {
+			switch result.ErrorType {
+			case ErrorTypeTLS:
+				osExit(ExitErrTLS)
+			case ErrorTypeAuth:
+				osExit(ExitErrAuth)
+			case ErrorTypeConnection:
+				osExit(ExitErrDNS)
+			default:
+				osExit(ExitErrSend)
+			}
+		} else {
+			osExit(ExitErrSend)
+		}
 		return
 	}
 }

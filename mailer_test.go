@@ -264,7 +264,7 @@ func TestSendEmail_AdvancedOptions(t *testing.T) {
 		InlineAttachments: []string{inlineFile},
 		Headers:           map[string]string{"X-Custom-Header": "TestValue"},
 		Importance:        "high",
-		TLSMode:           "tls-skip",
+		TLSMode:           "ignore-trust",
 		Timeout:           10,
 		Debug:             true,
 		AuthType:          "login",
@@ -304,6 +304,84 @@ func TestSendEmail_AdvancedOptions(t *testing.T) {
 	res, err = SendEmail(params)
 	if err != nil || res.Status != "success" {
 		t.Fatalf("SendEmail with cram-md5 auth failed: %v", err)
+	}
+}
+
+func TestClassifyError(t *testing.T) {
+	tests := []struct {
+		name     string
+		errMsg   string
+		expected ErrorType
+	}{
+		{"nil error", "", ErrorTypeUnknown},
+		{"TLS error", "tls: handshake failure", ErrorTypeTLS},
+		{"certificate error", "x509: certificate signed by unknown authority", ErrorTypeTLS},
+		{"auth 535 error", "535 5.7.8 Authentication credentials invalid", ErrorTypeAuth},
+		{"auth 534 error", "534 5.7.9 Application-specific password required", ErrorTypeAuth},
+		{"login error", "login failed: bad credentials", ErrorTypeAuth},
+		{"dial error", "dial tcp: connection refused", ErrorTypeConnection},
+		{"timeout error", "i/o timeout", ErrorTypeConnection},
+		{"connection reset", "read: connection reset by peer", ErrorTypeConnection},
+		{"generic send error", "SMTP error 550", ErrorTypeSend},
+		{"unknown error", "some random error", ErrorTypeSend},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var err error
+			if tt.errMsg != "" {
+				err = errors.New(tt.errMsg)
+			}
+			result := ClassifyError(err)
+			if result != tt.expected {
+				t.Errorf("ClassifyError(%q) = %v, want %v", tt.errMsg, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSendEmail_NoLogRecipients(t *testing.T) {
+	origFactory := defaultClientFactory
+	t.Cleanup(func() { defaultClientFactory = origFactory })
+
+	mock := &mockSender{
+		dialAndSendFunc: func(m ...*mail.Msg) error {
+			return nil
+		},
+	}
+	defaultClientFactory = mockFactory(mock, nil)
+
+	tmpDir := t.TempDir()
+	logFile := filepath.Join(tmpDir, "privacy_audit.log")
+
+	params := EmailParams{
+		SMTPServer:      "smtp.example.com",
+		SMTPPort:        587,
+		From:            "sender@example.com",
+		To:              []string{"recipient1@example.com", "recipient2@example.com"},
+		Subject:         "Privacy Test",
+		Body:            "Test Body",
+		LogFile:         logFile,
+		NoLogRecipients: true,
+	}
+
+	_, err := SendEmail(params)
+	if err != nil {
+		t.Fatalf("SendEmail failed unexpectedly: %v", err)
+	}
+
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	logStr := string(logData)
+	// Should contain redacted count, not actual emails
+	if !strings.Contains(logStr, "[2 recipients redacted]") {
+		t.Errorf("expected log to contain redacted recipients, got: %s", logStr)
+	}
+	if strings.Contains(logStr, "recipient1@example.com") {
+		t.Errorf("log should NOT contain actual recipient email, got: %s", logStr)
 	}
 }
 

@@ -2,7 +2,7 @@
 
 ## 1. System Overview & Core Design Philosophy
 
-`mailxgo` is designed as a zero-dependency (outside of standard Go libraries and `go-mail`), single-binary executable and modular Go package. The software architecture prioritizes:
+`mailxgo` is designed as a minimal-dependency (Go standard library, `go-mail`, and `secretprotector`), single-binary executable and modular Go package. The software architecture prioritizes:
 - **Predictability & Determinism:** Parameter priority evaluation and system exit codes follow strict deterministic contracts.
 - **Resilience:** Defensive validation prevents remote socket dialing when inputs or payload sizes violate bounds.
 - **Observability:** Telemetry output is decoupled into human-readable text, structured indented JSON, and single-line NDJSON formats.
@@ -46,11 +46,19 @@ func priorityString(strings []string) string {
 * **Location:** [mailer.go](./mailer.go#L260-L288)
 * **Purpose:** Dynamically constructs SASL authentication options based on user preference or remote ESMTP capability advertisement (`EHLO`).
 * **Supported Strategies:**
-  - `noAuthSASL`: Custom unauthenticated SASL fallback (`PLAIN` with `anonymous`).
+  - `SMTPAuthNoAuth`: go-mail's built-in no-authentication mode for unauthenticated relays.
   - `SMTPAuthPlain`: Standard PLAIN authentication (RFC 4616).
   - `SMTPAuthLogin`: Challenge-response LOGIN authentication.
   - `SMTPAuthCramMD5`: Challenge-response CRAM-MD5 authentication (RFC 2195).
   - `SMTPAuthXOAUTH2`: OAuth 2.0 Access Token bearer authentication (RFC 6749).
+
+### 2.4 Decorator Pattern for TLS Configuration
+* **Location:** [crypto.go](./crypto.go)
+* **Purpose:** Extends standard TLS configuration with custom trust stores, fingerprint pinning, and encrypted credential decryption.
+* **Components:**
+  - `loadCustomCACerts`: Loads PEM certificates from file or directory into a custom CA pool.
+  - `createFingerprintVerifier`: Creates a TLS `VerifyPeerCertificate` callback for SHA256 fingerprint pinning.
+  - `DecryptSecret`: Decrypts AES-256-GCM encrypted credentials (v1:gcm: prefix) via secretprotector.
 
 ---
 

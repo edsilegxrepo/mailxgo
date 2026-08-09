@@ -18,6 +18,7 @@ package mailxgo
 import (
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/smtp"
@@ -62,15 +63,26 @@ type ESMTPCapabilities struct {
 
 // TLSCertInfo stores X.509 certificate chain details extracted during TLS handshake.
 type TLSCertInfo struct {
-	Subject             string   `json:"subject"`
-	Issuer              string   `json:"issuer"`
-	NotBefore           string   `json:"not_before"`
-	NotAfter            string   `json:"not_after"`
-	DaysUntilExpiration int      `json:"days_until_expiration"`
-	DNSNames            []string `json:"dns_names,omitempty"`
-	Version             string   `json:"tls_version"`
-	CipherSuite         string   `json:"cipher_suite"`
-	ExpirationWarning   bool     `json:"expiration_warning"`
+	Subject             string           `json:"subject"`
+	Issuer              string           `json:"issuer"`
+	NotBefore           string           `json:"not_before"`
+	NotAfter            string           `json:"not_after"`
+	DaysUntilExpiration int              `json:"days_until_expiration"`
+	DNSNames            []string         `json:"dns_names,omitempty"`
+	Fingerprint         string           `json:"fingerprint_sha256"`
+	Version             string           `json:"tls_version"`
+	CipherSuite         string           `json:"cipher_suite"`
+	ExpirationWarning   bool             `json:"expiration_warning"`
+	ChainOfTrust        []CertChainEntry `json:"chain_of_trust,omitempty"`
+}
+
+// CertChainEntry represents a certificate in the chain of trust.
+type CertChainEntry struct {
+	Subject     string `json:"subject"`
+	Issuer      string `json:"issuer"`
+	Fingerprint string `json:"fingerprint_sha256"`
+	NotAfter    string `json:"not_after"`
+	IsCA        bool   `json:"is_ca"`
 }
 
 // DNSDiagInfo stores DNS host IP resolutions, MX priority lists, and SPF/DMARC record policies.
@@ -206,12 +218,31 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 	var tlsState *tls.ConnectionState
 
 	if params.SMTPPort == 465 || params.TLSMode == "tls-direct" {
-		// #nosec G402 -- InsecureSkipVerify is user-configurable via tls-skip mode for internal relays.
+		// #nosec G402 -- InsecureSkipVerify is user-configurable via ignore-trust mode for internal relays.
 		tlsConfig := &tls.Config{
-			InsecureSkipVerify: params.TLSMode == "tls-skip",
+			InsecureSkipVerify: params.TLSMode == "ignore-trust",
 			ServerName:         params.SMTPServer,
 			MinVersion:         tls.VersionTLS12,
 		}
+
+		// Custom CA certificates
+		if params.TLSCACert != "" || params.TLSCADir != "" {
+			rootCAs, err := loadCustomCACerts(params.TLSCACert, params.TLSCADir)
+			if err != nil {
+				report.Status = "error"
+				report.Error = fmt.Sprintf("Failed to load custom CA certificates: %v", err)
+				return &report, OutputDiagReport(report, params.JSONOutput, params.NDJSONOutput, printCerts)
+			}
+			tlsConfig.RootCAs = rootCAs
+			tlsConfig.InsecureSkipVerify = false
+		}
+
+		// Certificate fingerprint pinning
+		if params.TLSFingerprint != "" {
+			tlsConfig.VerifyPeerCertificate = createFingerprintVerifier(params.TLSFingerprint)
+			tlsConfig.InsecureSkipVerify = true
+		}
+
 		tTLS0 := time.Now()
 		tlsConn := tls.Client(conn, tlsConfig)
 		if err := tlsConn.Handshake(); err != nil {
@@ -258,14 +289,33 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 	report.Latency.TotalMS = report.Latency.TCPConnectMS + report.Latency.TLSHandshakeMS + report.Latency.EHLORTTMS
 
 	// STARTTLS if supported and required
-	if ok, _ := client.Extension("STARTTLS"); ok && (params.TLSMode == "tls" || params.TLSMode == "tls-skip") && params.SMTPPort != 465 {
+	if ok, _ := client.Extension("STARTTLS"); ok && (params.TLSMode == "tls" || params.TLSMode == "ignore-trust") && params.SMTPPort != 465 {
 		report.Capabilities.StartTLS = true
-		// #nosec G402 -- InsecureSkipVerify is user-configurable via tls-skip mode for internal relays.
+		// #nosec G402 -- InsecureSkipVerify is user-configurable via ignore-trust mode for internal relays.
 		tlsConfig := &tls.Config{
-			InsecureSkipVerify: params.TLSMode == "tls-skip",
+			InsecureSkipVerify: params.TLSMode == "ignore-trust",
 			ServerName:         params.SMTPServer,
 			MinVersion:         tls.VersionTLS12,
 		}
+
+		// Custom CA certificates
+		if params.TLSCACert != "" || params.TLSCADir != "" {
+			rootCAs, err := loadCustomCACerts(params.TLSCACert, params.TLSCADir)
+			if err != nil {
+				report.Status = "error"
+				report.Error = fmt.Sprintf("Failed to load custom CA certificates: %v", err)
+				return &report, OutputDiagReport(report, params.JSONOutput, params.NDJSONOutput, printCerts)
+			}
+			tlsConfig.RootCAs = rootCAs
+			tlsConfig.InsecureSkipVerify = false
+		}
+
+		// Certificate fingerprint pinning
+		if params.TLSFingerprint != "" {
+			tlsConfig.VerifyPeerCertificate = createFingerprintVerifier(params.TLSFingerprint)
+			tlsConfig.InsecureSkipVerify = true
+		}
+
 		tTLS0 := time.Now()
 		if err := client.StartTLS(tlsConfig); err != nil {
 			report.Status = "error"
@@ -275,6 +325,11 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 		tlsLatency := time.Since(tTLS0).Seconds() * 1000
 		report.Latency.TLSHandshakeMS = tlsLatency
 		report.Latency.TotalMS += tlsLatency
+
+		// Capture TLS connection state after STARTTLS upgrade
+		if state, ok := client.TLSConnectionState(); ok {
+			tlsState = &state
+		}
 	}
 
 	// Discover extensions
@@ -312,6 +367,22 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 		now := time.Now()
 		daysRemaining := int(leaf.NotAfter.Sub(now).Hours() / 24)
 
+		// Compute SHA256 fingerprint of leaf certificate
+		leafFingerprint := FormatFingerprint(ComputeCertFingerprint(leaf.Raw))
+
+		// Build chain of trust
+		var chain []CertChainEntry
+		for _, cert := range tlsState.PeerCertificates {
+			entry := CertChainEntry{
+				Subject:     cert.Subject.String(),
+				Issuer:      cert.Issuer.String(),
+				Fingerprint: FormatFingerprint(ComputeCertFingerprint(cert.Raw)),
+				NotAfter:    cert.NotAfter.Format("2006-01-02"),
+				IsCA:        cert.IsCA,
+			}
+			chain = append(chain, entry)
+		}
+
 		report.TLSInfo = &TLSCertInfo{
 			Subject:             leaf.Subject.String(),
 			Issuer:              leaf.Issuer.String(),
@@ -319,9 +390,11 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 			NotAfter:            leaf.NotAfter.Format("2006-01-02"),
 			DaysUntilExpiration: daysRemaining,
 			DNSNames:            leaf.DNSNames,
+			Fingerprint:         leafFingerprint,
 			Version:             getTLSVersionString(tlsState.Version),
 			CipherSuite:         getCipherSuiteString(tlsState.CipherSuite),
 			ExpirationWarning:   daysRemaining <= 30,
+			ChainOfTrust:        chain,
 		}
 	}
 
@@ -336,7 +409,7 @@ func OutputDiagReport(report DiagReport, jsonOutput bool, ndjsonOutput bool, pri
 		data, _ := json.Marshal(report)
 		fmt.Println(string(data))
 		if report.Status != "success" {
-			return fmt.Errorf("%s", report.Error)
+			return errors.New(report.Error)
 		}
 		return nil
 	}
@@ -344,7 +417,7 @@ func OutputDiagReport(report DiagReport, jsonOutput bool, ndjsonOutput bool, pri
 		data, _ := json.MarshalIndent(report, "", "  ")
 		fmt.Println(string(data))
 		if report.Status != "success" {
-			return fmt.Errorf("%s", report.Error)
+			return errors.New(report.Error)
 		}
 		return nil
 	}
@@ -367,7 +440,7 @@ func OutputDiagReport(report DiagReport, jsonOutput bool, ndjsonOutput bool, pri
 
 	if report.Status != "success" {
 		fmt.Printf("\n[DIAGNOSTIC FAILED]: %s\n", report.Error)
-		return fmt.Errorf("%s", report.Error)
+		return errors.New(report.Error)
 	}
 
 	fmt.Println("\n--- Network & Latency Metrics ---")
@@ -403,8 +476,36 @@ func OutputDiagReport(report DiagReport, jsonOutput bool, ndjsonOutput bool, pri
 		}
 		fmt.Printf("TLS Protocol         : %s\n", report.TLSInfo.Version)
 		fmt.Printf("Cipher Suite         : %s\n", report.TLSInfo.CipherSuite)
+		fmt.Printf("SHA256 Fingerprint   : %s\n", report.TLSInfo.Fingerprint)
 		if len(report.TLSInfo.DNSNames) > 0 {
 			fmt.Printf("SAN Names            : %s\n", strings.Join(report.TLSInfo.DNSNames, ", "))
+		}
+
+		// Display chain of trust
+		if len(report.TLSInfo.ChainOfTrust) > 0 {
+			fmt.Println("\n--- Certificate Chain of Trust ---")
+			for i, cert := range report.TLSInfo.ChainOfTrust {
+				certType := "End-Entity"
+				if cert.IsCA {
+					if i == len(report.TLSInfo.ChainOfTrust)-1 {
+						certType = "Root CA"
+					} else {
+						certType = "Intermediate CA"
+					}
+				}
+				fmt.Printf("[%d] %s\n", i, certType)
+				fmt.Printf("    Subject     : %s\n", cert.Subject)
+				fmt.Printf("    Issuer      : %s\n", cert.Issuer)
+				fmt.Printf("    Expires     : %s\n", cert.NotAfter)
+				fmt.Printf("    Fingerprint : %s\n", cert.Fingerprint)
+			}
+			if len(report.TLSInfo.ChainOfTrust) == 1 {
+				// Check if self-signed
+				chain := report.TLSInfo.ChainOfTrust[0]
+				if chain.Subject == chain.Issuer {
+					fmt.Println("\n    Note: Self-signed certificate (no CA chain)")
+				}
+			}
 		}
 	}
 

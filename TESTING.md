@@ -112,8 +112,45 @@ sequenceDiagram
 | **Utilities** | `TestLoadRecipientList` | Tests file reading of recipient addresses with CRLF/LF trimming and comment filtering. | PASS on returning valid recipient addresses; skipping `#` comment lines. |
 | **Utilities** | `TestLoadAttachmentList` | Tests file reading of attachment paths with CRLF/LF trimming and comment filtering. | PASS on returning valid file paths; skipping `#` comment lines. |
 | **Utilities** | `TestScanAttachmentDir` | Tests directory scanning (`os.ReadDir`) for regular files. | PASS on returning full file paths for non-directory files. |
-| **Integration** | `TestIntegration_LiveSMTPServer` | Performs live ESMTP transaction against in-process TCP listener (`127.0.0.1:1025`). | PASS on complete socket transaction, 250 OK queue acknowledgment, and message content match. |
-| **CLI Binary** | `TestUsage` | Asserts `cmd/mailxgo` package usage function executes and calls `osExit(1)`. | PASS on trapped exit code `1`. |
+| **Integration** | `TestLive_BasicEmail` | Basic email send via Mailpit or fallback ESMTP server. | PASS on `status: success` and Mailpit API verification of subject/from. |
+| **Integration** | `TestLive_FullFeaturedEmail` | Comprehensive test of ALL `EmailParams` fields including attachments, headers, DSN, importance, context, and audit logging. | PASS on all fields verified via Mailpit API (From, To, CC, ReplyTo, attachments, custom headers). |
+| **Integration** | `TestLive_Authentication` | SASL authentication test for `plain`, `login`, and `auto` auth types. | PASS on successful send with each auth type. |
+| **Integration** | `TestLive_ListsAndDirectories` | Tests `LoadRecipientList`, `LoadAttachmentList`, and `ScanAttachmentDir` with live send. | PASS on correct recipient count (4) and attachment count (4) via Mailpit API. |
+| **Integration** | `TestLive_MaxAttachmentSize` | Tests attachment size guard rejection and acceptance. | PASS on error for oversized attachment; success when within limit. |
+| **Integration** | `TestLive_PrivacyNoLogRecipients` | Tests `--no-log-recipients` GDPR privacy flag. | PASS on log containing `[N recipients redacted]` and NOT containing actual email addresses. |
+| **Integration** | `TestLive_ContextCancellation` | Tests `context.Context` cancellation during send with retries. | PASS on detecting context cancellation. |
+| **Integration** | `TestLive_RetryMechanism` | Tests retry loop execution with successful server. | PASS on `status: success` with attempts count. |
+| **Integration** | `TestLive_Diagnostics` | Tests `RunDiagnostics` pre-flight gateway probe. | PASS on `status: success` with positive TCP/EHLO latency metrics. |
+| **Integration** | `TestLive_OutputFormats` | Tests `--json-output` and `--ndjson-output` formatting modes. | PASS on successful send in all three output modes. |
+| **Integration** | `TestLive_ImportanceLevels` | Tests `--importance` flag with `high`, `normal`, `low` values. | PASS on successful send with each importance level. |
+| **Integration** | `TestLive_CLIBinary` | End-to-end CLI binary execution via `go run ./cmd/mailxgo`. | PASS on JSON output with `status: success`, diagnostics, and version output. |
+| **Integration** | `TestLive_EmailValidation` | Tests email address validation rejection for invalid formats. | PASS on error containing `invalid` for malformed addresses. |
+| **Integration** | `TestLive_ConfigFileAllOptions` | Tests comprehensive JSON config file with all options. | PASS on config load and CLI send with config file. |
+| **Integration** | `TestLive_ErrorClassification` | Tests `ClassifyError()` for TLS, Auth, Connection, and Send error types. | PASS on correct `ErrorType` classification for each error pattern. |
+| **Utilities** | `TestValidateEmail` | Tests RFC 5322 email address format validation. | PASS on valid formats; error on empty, missing @, missing domain, invalid chars. |
+| **Utilities** | `TestValidateEmailList` | Tests batch email list validation. | PASS on valid list; error if any address is invalid. |
+| **Utilities** | `TestValidateFilePath` | Tests absolute path enforcement and path traversal detection. | PASS on Unix `/path`, Windows `C:\path`, `D:/path`; error on relative paths and `..` traversal. |
+| **Utilities** | `TestDecryptSecret` | Tests secretprotector integration for encrypted secrets. | PASS on plain secrets unchanged; error on encrypted secrets without master key. |
+| **Mailer Engine** | `TestClassifyError` | Tests error type classification (TLS, Auth, Connection, Send). | PASS on correct `ErrorType` for each error pattern. |
+| **Mailer Engine** | `TestSendEmail_NoLogRecipients` | Tests privacy flag redacting recipients from audit log. | PASS on log containing redacted count, not actual addresses. |
+| **Secretprotector** | `TestLive_SecretprotectorEncryptedPassword` | E2E test of AES-256-GCM encrypted credentials via secretprotector. Subtests: PlainPassword, EncryptedPassword_NoMasterKey, EncryptedPassword_WithMasterKey, EncryptedOAuth2Token. | PASS on plain password send; error on encrypted without key; success on encrypted with key; success on encrypted OAuth2 token. |
+| **Secretprotector** | `TestLive_CLI_SecretprotectorCredentials` | CLI E2E test with encrypted password in JSON config file. | PASS on CLI send with `SECRETPROTECTOR_MASTER_KEY` env var and Mailpit verification. |
+| **Crypto** | `TestNormalizeFingerprint` | Tests fingerprint normalization (remove colons, uppercase). | PASS on all normalization cases. |
+| **Crypto** | `TestFormatFingerprint` | Tests fingerprint formatting with colons. | PASS on AA:BB:CC:DD format output. |
+| **Crypto** | `TestValidateCertFingerprint` | Tests SHA256 fingerprint validation (64 hex chars). | PASS on valid fingerprints; error on invalid length/chars. |
+| **Crypto** | `TestComputeCertFingerprint` | Tests SHA256 computation from DER certificate. | PASS on deterministic 64-char uppercase hex output. |
+| **Crypto** | `TestLoadCustomCACerts_SingleFile` | Tests loading CA cert from PEM file. | PASS on valid cert pool creation. |
+| **Crypto** | `TestLoadCustomCACerts_Directory` | Tests loading CA certs from directory (.pem, .crt, .cer). | PASS on loading multiple certs, ignoring non-cert files. |
+| **Crypto** | `TestLoadCustomCACerts_InvalidFile` | Tests error handling for missing/invalid PEM files. | PASS on appropriate error messages. |
+| **Crypto** | `TestLoadCustomCACerts_RelativePath` | Tests rejection of relative paths (security). | PASS on error for relative paths. |
+| **Crypto** | `TestCreateFingerprintVerifier` | Tests TLS fingerprint pinning verifier function. | PASS on matching fingerprint; error on mismatch. |
+| **Integration** | `TestLive_TLSModes` | E2E test of TLS modes (`none`, `ignore-trust`). | PASS on successful send with each TLS mode. |
+| **Integration** | `TestLive_TLSCACert` | E2E test of `--tls-ca-cert` CA certificate loading. | PASS on loading PEM cert and successful send. |
+| **Integration** | `TestLive_TLSCADir` | E2E test of `--tls-ca-dir` CA directory loading. | PASS on loading .pem/.crt/.cer files from directory. |
+| **Integration** | `TestLive_TLSFingerprintValidation` | E2E test of fingerprint format validation. | PASS on valid fingerprints; error on invalid format. |
+| **Integration** | `TestLive_DiagnosticsWithTLSOptions` | E2E test of diagnostics with TLS options. | PASS on diagnostics with `ignore-trust` and CA cert. |
+| **Integration** | `TestLive_CLI_TLSOptions` | E2E test of CLI with TLS config options. | PASS on CLI send with TLS mode in config file. |
+| **CLI Binary** | `TestMainCompiles` | Asserts `cmd/mailxgo` package compiles without errors. | PASS on clean compilation. |
 
 ---
 
@@ -124,10 +161,10 @@ Statement coverage statistics measured across the workspace:
 
 | Package Path | Statement Coverage | Status ($\ge 80\%$) |
 | :--- | :--- | :--- |
-| `github.com/edsilegxrepo/mailxgo` (Unit Tests) | **87.2%** | PASS |
-| `github.com/edsilegxrepo/mailxgo` (With Integration Tag) | **91.4%** | PASS |
-| `github.com/edsilegxrepo/mailxgo/cmd/mailxgo` | **97.8%** | PASS |
-| **Total Combined Workspace Coverage** | **92.1%** | **PASS** |
+| `github.com/edsilegxrepo/mailxgo` (Unit Tests) | **84.6%** | PASS |
+| `github.com/edsilegxrepo/mailxgo` (With Integration Tag) | **90%+** | PASS |
+| `github.com/edsilegxrepo/mailxgo/cmd/mailxgo` | Entry point only | N/A |
+| **Total Combined Workspace Coverage** | **85%+** | **PASS** |
 
 ### 5.2 Refreshing Coverage Statistics
 To refresh and verify code coverage profile statistics locally:
@@ -153,12 +190,33 @@ go tool cover -html=coverage.out
 
 ## 6. Realistic Data Simulation & Live Listener Integration
 
-The integration test suite (`integration_test.go`) implements an in-process ESMTP live listener server (`liveSMTPServer`) that binds to loopback TCP port `127.0.0.1:1025`.
+The integration test suite (`integration_test.go`) implements a dual-mode SMTP backend:
 
-### 6.1 Server Capabilities Simulated
-- **ESMTP EHLO Advertisement:** Advertises `SIZE 26214400`, `8BITMIME`, `AUTH PLAIN LOGIN`, `PIPELINING`.
+### 6.1 Mailpit Container Integration (Preferred)
+When Docker is available, the test suite automatically launches a **Mailpit** container (`axllent/mailpit`) providing:
+
+- **Full ESMTP Server:** Real RFC 5321 compliant SMTP server on port `1025`.
+- **REST API Verification:** Tests use Mailpit's REST API (`http://127.0.0.1:8025/api/v1/`) to verify:
+  - Message envelope (From, To, CC, BCC, ReplyTo)
+  - Subject and body content (HTML/Text)
+  - Attachment count and content
+  - Custom headers (X-Custom-Header, X-Campaign-ID, etc.)
+  - From name display formatting
+- **Web UI:** Mailpit provides a web interface at `http://127.0.0.1:8025` for manual inspection during development.
+
+### 6.2 Fallback In-Process ESMTP Server
+When Docker/Mailpit is unavailable, the suite falls back to an in-process ESMTP listener (`liveSMTPServer`) on `127.0.0.1:1025`:
+
+- **ESMTP EHLO Advertisement:** Advertises `SIZE 26214400`, `8BITMIME`, `AUTH PLAIN LOGIN`, `STARTTLS`, `DSN`, `PIPELINING`.
 - **SASL Authentication:** Handles `AUTH PLAIN` and `AUTH LOGIN` challenge-response exchanges.
 - **DATA Payload Buffering:** Accepts multi-line MIME streams, handles dot-stuffing (`..`), buffers incoming messages, and returns standard RFC 5321 `250 2.0.0 OK queued` status codes.
+
+### 6.3 Test Environment Detection
+The test suite automatically:
+1. Checks if port `1025` is already occupied (existing Mailpit instance).
+2. Attempts to start a Mailpit Docker container if port is free.
+3. Falls back to embedded ESMTP server if Docker is unavailable.
+4. Logs which backend is active for each test run.
 
 ---
 
