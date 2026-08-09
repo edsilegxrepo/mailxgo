@@ -1,3 +1,17 @@
+// Package mailxgo - Configuration & Provider Preset Engine
+//
+// OBJECTIVES:
+// Define the JSON configuration file schema (Config) and provide pre-configured mail provider preset resolutions (ProviderPresets).
+//
+// CORE COMPONENTS:
+// - ProviderPreset: Map entry struct for mail provider presets (Host, Port, TLSMode).
+// - ProviderPresets: Pre-configured lookup table for enterprise (office365, aws-ses, sendgrid) and consumer (gmail, outlook, yahoo) mail providers.
+// - ResolveProviderPreset: Lookup function performing case-insensitive provider preset matching.
+// - Config: Complete JSON configuration file unmarshaling struct.
+// - LoadConfig: Stream-decoding function loading JSON config files from disk.
+//
+// FUNCTIONALITY & DATA FLOW:
+// Config File Path -> os.Open -> json.NewDecoder -> Config struct -> Merged with CLI arguments in cli.go via priority evaluation.
 package mailxgo
 
 import (
@@ -7,6 +21,7 @@ import (
 )
 
 // ProviderPreset holds standard configuration presets for common mail servers.
+// Core Components: Host address, default SMTP port, and TLS transport policy.
 type ProviderPreset struct {
 	Host    string
 	Port    int
@@ -14,6 +29,7 @@ type ProviderPreset struct {
 }
 
 // ProviderPresets holds pre-configured settings for enterprise and consumer mail services.
+// Objectives: Allow rapid configuration via simple preset aliases (--use office365|googleworkspace|aws-ses|gmail|outlook).
 var ProviderPresets = map[string]ProviderPreset{
 	// Corporate / Enterprise Presets
 	"office365":         {Host: "smtp.office365.com", Port: 587, TLSMode: "tls"},
@@ -41,12 +57,14 @@ var ProviderPresets = map[string]ProviderPreset{
 }
 
 // ResolveProviderPreset returns the ProviderPreset for a given provider name.
+// Functionality: Performs case-insensitive, whitespace-trimmed lookup in ProviderPresets map.
 func ResolveProviderPreset(name string) (ProviderPreset, bool) {
 	preset, ok := ProviderPresets[strings.ToLower(strings.TrimSpace(name))]
 	return preset, ok
 }
 
 // Config defines the JSON configuration schema for Mail2Go.
+// Data Flow: Unmarshaled from JSON files (~/.config/mailxgo/config.json or explicit -c paths).
 type Config struct {
 	SMTPServer        string            `json:"smtp_server"`
 	SMTPPort          int               `json:"smtp_port"`
@@ -79,20 +97,25 @@ type Config struct {
 	Token             string            `json:"token"`
 	Use               string            `json:"use"`
 	Charset           string            `json:"charset"`
+	Subject           string            `json:"subject"`
+	Body              string            `json:"body"`
+	BodyFile          string            `json:"body_file"`
 	AttachmentsList   string            `json:"attachments_list"`
 	AttachmentsDir    string            `json:"attachments_dir"`
 	MaxAttachmentMB   int               `json:"max_attachment_size_mb"`
 }
 
 // LoadConfig decodes a JSON configuration file from disk.
+// Functionality: Stream decodes specified file path into a Config struct. Returns error if file missing or malformed JSON.
 func LoadConfig(filePath string) (Config, error) {
 	var config Config
 
+	// #nosec G304
 	file, err := os.Open(filePath)
 	if err != nil {
 		return config, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	decoder := json.NewDecoder(file)
 	err = decoder.Decode(&config)

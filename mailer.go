@@ -1,3 +1,17 @@
+// Package mailxgo - Email Composition, MIME Construction, & ESMTP Dispatch Engine
+//
+// OBJECTIVES:
+// Provide core email payload composition, MIME header formatting, attachment bounds validation, SASL/OAuth2 authentication negotiation, TLS transport enforcement, dial retry backoff loops, and structured telemetry generation.
+//
+// CORE COMPONENTS:
+// - EmailParams: Input options struct containing all parameters for email delivery.
+// - JSONResult: Telemetry output struct serialized to human text, JSON, or single-line NDJSON formats.
+// - SendEmail: Core transmission function handling MIME construction, pre-dial size validation, TLS setup, retry execution, and logging.
+// - clientSender / clientFactory: Interface abstractions over go-mail.Client enabling unit test client mocking.
+// - noAuthSASL: Custom SASL PLAIN mechanism for unauthenticated internal relays.
+//
+// FUNCTIONALITY & DATA FLOW:
+// EmailParams -> CleanEmailList -> MIME construction (m.NewMsg) -> Pre-dial payload size check -> TLS/Auth configuration -> Retry loop (DialAndSend) -> Telemetry output (JSON/NDJSON) & Audit file logging.
 package mailxgo
 
 import (
@@ -9,8 +23,36 @@ import (
 	"time"
 
 	"github.com/wneessen/go-mail"
+	mailsmtp "github.com/wneessen/go-mail/smtp"
 )
 
+// clientSender defines an interface abstraction over go-mail.Client for unit testing.
+type clientSender interface {
+	DialAndSend(m ...*mail.Msg) error
+}
+
+// clientFactory defines a factory function type for instantiating clientSender instances.
+type clientFactory func(host string, opts ...mail.Option) (clientSender, error)
+
+// defaultClientFactory is the default clientFactory function using mail.NewClient. Intercepted in unit tests.
+var defaultClientFactory clientFactory = func(host string, opts ...mail.Option) (clientSender, error) {
+	return mail.NewClient(host, opts...)
+}
+var timeSleep = time.Sleep
+
+// noAuthSASL implements a custom SASL PLAIN fallback for unauthenticated internal relays.
+type noAuthSASL struct{}
+
+func (a *noAuthSASL) Start(server *mailsmtp.ServerInfo) (string, []byte, error) {
+	return "PLAIN", []byte("\x00anonymous\x00anonymous"), nil
+}
+
+func (a *noAuthSASL) Next(fromServer []byte, more bool) ([]byte, error) {
+	return nil, nil
+}
+
+// EmailParams defines all configuration options for constructing and delivering an email.
+// Core Components: Connection settings, authentication credentials, recipient lists, MIME payload, and observability options.
 type EmailParams struct {
 	SMTPServer        string
 	SMTPPort          int
@@ -47,6 +89,7 @@ type EmailParams struct {
 	NDJSONOutput      bool
 }
 
+// JSONResult represents the structured telemetry output payload for email dispatch execution.
 type JSONResult struct {
 	Status     string   `json:"status"`
 	Timestamp  string   `json:"timestamp"`
@@ -60,6 +103,7 @@ type JSONResult struct {
 }
 
 // SendEmail transmits an email according to the specified EmailParams options.
+// Data Flow: Validates payload boundaries -> Constructs MIME message -> Configures TLS/Auth -> Dial & Send retry loop -> Audit Logging & Output.
 func SendEmail(params EmailParams) (*JSONResult, error) {
 	// Create a new message
 	m := mail.NewMsg()
@@ -154,7 +198,11 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 
 	// Custom Headers
 	for k, v := range params.Headers {
-		m.SetHeader(mail.Header(k), v)
+		kClean := strings.TrimSpace(k)
+		vClean := strings.TrimSpace(v)
+		if kClean != "" && !strings.ContainsAny(kClean, "\r\n") && !strings.ContainsAny(vClean, "\r\n") {
+			m.SetGenHeader(mail.Header(kClean), vClean)
+		}
 	}
 
 	// Importance / Priority
@@ -212,17 +260,20 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 	}
 
 	// TLS Options
+	// #nosec G402 -- InsecureSkipVerify is configurable via tls-skip mode for internal relays with self-signed certs.
 	tlsConfig := &tls.Config{
-		ServerName: params.SMTPServer,
+		InsecureSkipVerify: params.TLSMode == "tls-skip",
+		ServerName:         params.SMTPServer,
+		MinVersion:         tls.VersionTLS12,
 	}
 
-	if params.TLSMode == "tls-skip" {
-		tlsConfig.InsecureSkipVerify = true
+	switch params.TLSMode {
+	case "tls-skip":
 		clientOptions = append(clientOptions, mail.WithTLSConfig(tlsConfig))
 		clientOptions = append(clientOptions, mail.WithTLSPolicy(mail.TLSMandatory))
-	} else if params.TLSMode == "none" {
+	case "none":
 		clientOptions = append(clientOptions, mail.WithTLSPolicy(mail.NoTLS))
-	} else {
+	default:
 		clientOptions = append(clientOptions, mail.WithTLSConfig(tlsConfig))
 		if params.SMTPPort == 465 {
 			clientOptions = append(clientOptions, mail.WithSSL())
@@ -232,8 +283,8 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 	}
 
 	// Authentication Options
-	if params.NoAuth {
-		// Unauthenticated SMTP relay
+	if params.NoAuth || (params.Username == "" && params.Password == "" && !params.OAuth2 && (params.AuthType == "" || strings.EqualFold(params.AuthType, "auto"))) {
+		clientOptions = append(clientOptions, mail.WithSMTPAuthCustom(&noAuthSASL{}))
 	} else if params.OAuth2 || strings.EqualFold(params.AuthType, "xoauth2") {
 		clientOptions = append(clientOptions, mail.WithSMTPAuth(mail.SMTPAuthXOAUTH2))
 		if params.Username != "" {
@@ -272,7 +323,7 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 
 	for i := 0; i < maxAttempts; i++ {
 		attempts++
-		c, err := mail.NewClient(params.SMTPServer, clientOptions...)
+		c, err := defaultClientFactory(params.SMTPServer, clientOptions...)
 		if err != nil {
 			lastErr = fmt.Errorf("failed to create SMTP client: %w", err)
 		} else {
@@ -296,7 +347,7 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 			if params.LogFile != "" {
 				logAttempt(params.LogFile, retryMsg)
 			}
-			time.Sleep(time.Duration(delay) * time.Second)
+			timeSleep(time.Duration(delay) * time.Second)
 		}
 	}
 
@@ -348,31 +399,33 @@ func OutputJSONResult(res JSONResult, jsonOutput bool, ndjsonOutput bool, from s
 }
 
 func logAttempt(logFile string, msg string) {
-	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	// #nosec G304 G302 -- User-configured log file path created with restricted 0600 file permissions.
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return
 	}
-	defer f.Close()
-	f.WriteString(msg)
+	defer func() { _ = f.Close() }()
+	_, _ = f.WriteString(msg)
 }
 
 func logAudit(logFile string, timestamp string, success bool, attempts int, errStr string, params EmailParams) {
 	if logFile == "" {
 		return
 	}
-	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	// #nosec G304 G302 -- User-configured audit log file path created with restricted 0600 file permissions.
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if success {
 		entry := fmt.Sprintf("[%s] SUCCESS: Email sent successfully to [%s] via %s:%d (attempts: %d)\n",
 			timestamp, strings.Join(params.To, ", "), params.SMTPServer, params.SMTPPort, attempts)
-		f.WriteString(entry)
+		_, _ = f.WriteString(entry)
 	} else {
 		entry := fmt.Sprintf("[%s] ERROR: Email sending failed to [%s] via %s:%d after %d attempts: %s\n",
 			timestamp, strings.Join(params.To, ", "), params.SMTPServer, params.SMTPPort, attempts, errStr)
-		f.WriteString(entry)
+		_, _ = f.WriteString(entry)
 	}
 }

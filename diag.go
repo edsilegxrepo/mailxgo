@@ -1,3 +1,18 @@
+// Package mailxgo - Gateway Diagnostics & Telemetry Probe Engine
+//
+// OBJECTIVES:
+// Execute non-destructive pre-flight probes against remote SMTP gateways to audit DNS host resolutions, MX records, SPF/DMARC policies, TCP dial RTT, TLS handshake/cert expiration, and ESMTP capability advertisements without delivering emails.
+//
+// CORE COMPONENTS:
+// - LatencyMetrics: Records decomposed phase round-trip times (tcp_connect_ms, tls_handshake_ms, ehlo_rtt_ms, total_ms).
+// - ESMTPCapabilities: Stores advertised server capability flags (STARTTLS, CHUNKING, PIPELINING, DSN, 8BITMIME, SIZE).
+// - TLSCertInfo: Stores X.509 certificate chain details, expiration warnings, TLS protocol version, and cipher suite names.
+// - DNSDiagInfo: Stores host A/AAAA resolutions, MX priority lists, and SPF/DMARC policy strings.
+// - DiagReport: Aggregates complete diagnostic probe findings.
+// - RunDiagnostics: Core probe function orchestrating DNS lookup -> TCP dial -> TLS handshake -> EHLO capability check.
+//
+// FUNCTIONALITY & DATA FLOW:
+// EmailParams -> DNS Resolution (A/AAAA/MX/SPF/DMARC) -> TCP Dial RTT measurement -> TLS Handshake & Cert audit -> EHLO Capability Probe -> DiagReport -> OutputJSON/Text.
 package mailxgo
 
 import (
@@ -13,6 +28,17 @@ import (
 	"time"
 )
 
+// Network function pointers intercepted during unit testing.
+var (
+	netLookupHost  = net.LookupHost
+	netLookupMX    = net.LookupMX
+	netLookupTXT   = net.LookupTXT
+	netDialTimeout = net.DialTimeout
+	osHostname     = os.Hostname
+	smtpClientInit = smtp.NewClient
+)
+
+// LatencyMetrics records decomposed phase round-trip times in milliseconds.
 type LatencyMetrics struct {
 	TCPConnectMS   float64 `json:"tcp_connect_ms"`
 	TLSHandshakeMS float64 `json:"tls_handshake_ms,omitempty"`
@@ -20,6 +46,7 @@ type LatencyMetrics struct {
 	TotalMS        float64 `json:"total_ms"`
 }
 
+// ESMTPCapabilities stores ESMTP extension capability flags extracted during EHLO probe.
 type ESMTPCapabilities struct {
 	StartTLS      bool     `json:"starttls"`
 	Chunking      bool     `json:"chunking"`
@@ -33,6 +60,7 @@ type ESMTPCapabilities struct {
 	RawExtensions []string `json:"raw_extensions,omitempty"`
 }
 
+// TLSCertInfo stores X.509 certificate chain details extracted during TLS handshake.
 type TLSCertInfo struct {
 	Subject             string   `json:"subject"`
 	Issuer              string   `json:"issuer"`
@@ -45,6 +73,7 @@ type TLSCertInfo struct {
 	ExpirationWarning   bool     `json:"expiration_warning"`
 }
 
+// DNSDiagInfo stores DNS host IP resolutions, MX priority lists, and SPF/DMARC record policies.
 type DNSDiagInfo struct {
 	TargetHost  string   `json:"target_host"`
 	ResolvedIPs []string `json:"resolved_ips"`
@@ -53,6 +82,7 @@ type DNSDiagInfo struct {
 	DMARCRecord string   `json:"dmarc_record,omitempty"`
 }
 
+// DiagReport aggregates complete diagnostic probe findings for telemetry rendering.
 type DiagReport struct {
 	Status       string            `json:"status"`
 	Timestamp    string            `json:"timestamp"`
@@ -66,6 +96,7 @@ type DiagReport struct {
 	Error        string            `json:"error,omitempty"`
 }
 
+// getTLSVersionString maps uint16 TLS protocol versions to human-readable strings.
 func getTLSVersionString(version uint16) string {
 	switch version {
 	case tls.VersionTLS10:
@@ -81,6 +112,7 @@ func getTLSVersionString(version uint16) string {
 	}
 }
 
+// getCipherSuiteString maps uint16 cipher suite IDs to human-readable names.
 func getCipherSuiteString(id uint16) string {
 	for _, cs := range tls.CipherSuites() {
 		if cs.ID == id {
@@ -95,6 +127,8 @@ func getCipherSuiteString(id uint16) string {
 	return fmt.Sprintf("0x%04x", id)
 }
 
+// RunDiagnostics performs non-destructive pre-flight gateway probing against target SMTP servers.
+// Data Flow: Resolves DNS (A/AAAA/MX/SPF/DMARC) -> Measures TCP connect RTT -> Performs TLS handshake & Cert extraction -> Issues EHLO & measures extension capability RTT -> Renders diagnostic report.
 func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 	timestamp := time.Now().Format(time.RFC3339)
 	report := DiagReport{
@@ -115,12 +149,12 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 	dialTimeout := time.Duration(timeoutSec) * time.Second
 
 	// 1. DNS Resolution & MX Lookup
-	ips, err := net.LookupHost(params.SMTPServer)
+	ips, err := netLookupHost(params.SMTPServer)
 	if err == nil {
 		report.DNSInfo.ResolvedIPs = ips
 	}
 
-	mxRecords, err := net.LookupMX(params.SMTPServer)
+	mxRecords, err := netLookupMX(params.SMTPServer)
 	if err == nil && len(mxRecords) > 0 {
 		sort.Slice(mxRecords, func(i, j int) bool {
 			return mxRecords[i].Pref < mxRecords[j].Pref
@@ -135,14 +169,14 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 		parts := strings.Split(params.From, "@")
 		if len(parts) == 2 {
 			domain := parts[1]
-			txts, _ := net.LookupTXT(domain)
+			txts, _ := netLookupTXT(domain)
 			for _, txt := range txts {
 				if strings.HasPrefix(txt, "v=spf1") {
 					report.DNSInfo.SPFRecord = txt
 					break
 				}
 			}
-			dmarcTxts, _ := net.LookupTXT("_dmarc." + domain)
+			dmarcTxts, _ := netLookupTXT("_dmarc." + domain)
 			for _, txt := range dmarcTxts {
 				if strings.HasPrefix(txt, "v=DMARC1") {
 					report.DNSInfo.DMARCRecord = txt
@@ -156,7 +190,7 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 
 	// 2. TCP Connection Latency
 	t0 := time.Now()
-	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
+	conn, err := netDialTimeout("tcp", addr, dialTimeout)
 	tcpLatency := time.Since(t0).Seconds() * 1000
 	report.Latency.TCPConnectMS = tcpLatency
 
@@ -165,16 +199,18 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 		report.Error = fmt.Sprintf("TCP dial failed: %v", err)
 		return &report, OutputDiagReport(report, params.JSONOutput, params.NDJSONOutput, printCerts)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Handle Port 465 SSL/TLS or STARTTLS
 	var client *smtp.Client
 	var tlsState *tls.ConnectionState
 
 	if params.SMTPPort == 465 || params.TLSMode == "tls-direct" {
+		// #nosec G402 -- InsecureSkipVerify is user-configurable via tls-skip mode for internal relays.
 		tlsConfig := &tls.Config{
 			InsecureSkipVerify: params.TLSMode == "tls-skip",
 			ServerName:         params.SMTPServer,
+			MinVersion:         tls.VersionTLS12,
 		}
 		tTLS0 := time.Now()
 		tlsConn := tls.Client(conn, tlsConfig)
@@ -189,7 +225,7 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 		state := tlsConn.ConnectionState()
 		tlsState = &state
 
-		c, err := smtp.NewClient(tlsConn, params.SMTPServer)
+		c, err := smtpClientInit(tlsConn, params.SMTPServer)
 		if err != nil {
 			report.Status = "error"
 			report.Error = fmt.Sprintf("SMTP client init failed: %v", err)
@@ -197,7 +233,7 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 		}
 		client = c
 	} else {
-		c, err := smtp.NewClient(conn, params.SMTPServer)
+		c, err := smtpClientInit(conn, params.SMTPServer)
 		if err != nil {
 			report.Status = "error"
 			report.Error = fmt.Sprintf("SMTP banner/EHLO failed: %v", err)
@@ -209,7 +245,7 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 	// 3. EHLO & Capabilities Discovery
 	tEHLO0 := time.Now()
 	heloDomain := "localhost"
-	if host, err := os.Hostname(); err == nil && host != "" {
+	if host, err := osHostname(); err == nil && host != "" {
 		heloDomain = host
 	}
 	if err := client.Hello(heloDomain); err != nil {
@@ -224,9 +260,11 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 	// STARTTLS if supported and required
 	if ok, _ := client.Extension("STARTTLS"); ok && (params.TLSMode == "tls" || params.TLSMode == "tls-skip") && params.SMTPPort != 465 {
 		report.Capabilities.StartTLS = true
+		// #nosec G402 -- InsecureSkipVerify is user-configurable via tls-skip mode for internal relays.
 		tlsConfig := &tls.Config{
 			InsecureSkipVerify: params.TLSMode == "tls-skip",
 			ServerName:         params.SMTPServer,
+			MinVersion:         tls.VersionTLS12,
 		}
 		tTLS0 := time.Now()
 		if err := client.StartTLS(tlsConfig); err != nil {
@@ -287,7 +325,7 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 		}
 	}
 
-	client.Quit()
+	_ = client.Quit()
 
 	err = OutputDiagReport(report, params.JSONOutput, params.NDJSONOutput, printCerts)
 	return &report, err
