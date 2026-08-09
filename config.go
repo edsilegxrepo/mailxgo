@@ -45,7 +45,7 @@ var ProviderPresets = map[string]ProviderPreset{
 	"mailgun":           {Host: "smtp.mailgun.org", Port: 587, TLSMode: "tls"},
 	"postmark":          {Host: "smtp.postmarkapp.com", Port: 587, TLSMode: "tls"},
 	"fastmail":          {Host: "smtp.fastmail.com", Port: 587, TLSMode: "tls"},
-	"protonmail":        {Host: "127.0.0.1", Port: 1025, TLSMode: "tls-skip"},
+	"protonmail":        {Host: "127.0.0.1", Port: 1025, TLSMode: "ignore-trust"},
 
 	// Consumer Presets
 	"gmail":   {Host: "smtp.gmail.com", Port: 587, TLSMode: "tls"},
@@ -72,6 +72,9 @@ type Config struct {
 	SMTPPassword      string            `json:"smtp_password"`
 	NoAuth            bool              `json:"no_auth"`
 	TLSMode           string            `json:"tls_mode"`
+	TLSCACert         string            `json:"tls_ca_cert"`
+	TLSCADir          string            `json:"tls_ca_dir"`
+	TLSFingerprint    string            `json:"tls_fingerprint"`
 	FromName          string            `json:"from_name"`
 	FromEmail         string            `json:"from_email"`
 	ToEmail           string            `json:"to_email"`
@@ -103,6 +106,7 @@ type Config struct {
 	AttachmentsList   string            `json:"attachments_list"`
 	AttachmentsDir    string            `json:"attachments_dir"`
 	MaxAttachmentMB   int               `json:"max_attachment_size_mb"`
+	NoLogRecipients   bool              `json:"no_log_recipients"`
 }
 
 // LoadConfig decodes a JSON configuration file from disk.

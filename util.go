@@ -15,10 +15,80 @@ package mailxgo
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// emailRegex is a simplified RFC 5322 compliant email pattern.
+var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
+
+// ValidateEmail checks if an email address has a valid format.
+// Returns an error if the email address is invalid.
+func ValidateEmail(email string) error {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return fmt.Errorf("email address cannot be empty")
+	}
+	if len(email) > MaxEmailLength {
+		return fmt.Errorf("email address exceeds maximum length of %d characters", MaxEmailLength)
+	}
+	if !emailRegex.MatchString(email) {
+		return fmt.Errorf("invalid email address format: %s", email)
+	}
+	return nil
+}
+
+// ValidateEmailList validates a slice of email addresses.
+// Returns an error if any email address is invalid.
+func ValidateEmailList(emails []string) error {
+	for _, email := range emails {
+		if err := ValidateEmail(email); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateFilePath checks if a file path is safe.
+// Requires absolute paths only - relative paths are rejected for security.
+// Accepts Windows (C:\..., D:/...) and Unix (/...) style absolute paths.
+func ValidateFilePath(path string) error {
+	if path == "" {
+		return fmt.Errorf("file path cannot be empty")
+	}
+
+	// Check for absolute path - handle Windows and Unix styles
+	isAbsolute := filepath.IsAbs(path)
+
+	// On Windows, also accept:
+	// - Unix-style absolute paths starting with /
+	// - Windows paths with forward slashes (D:/path/to/file)
+	if !isAbsolute {
+		if len(path) > 0 && path[0] == '/' {
+			isAbsolute = true
+		} else if len(path) >= 2 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':' {
+			// Windows drive letter with colon (C: or c:) followed by / or \
+			isAbsolute = true
+		}
+	}
+
+	if !isAbsolute {
+		return fmt.Errorf("relative path not allowed, use absolute path: %s", path)
+	}
+
+	// Clean the path to normalize it
+	cleaned := filepath.Clean(path)
+
+	// Check for path traversal attempts (shouldn't happen with absolute paths, but defense in depth)
+	if strings.Contains(cleaned, "..") {
+		return fmt.Errorf("path traversal detected in path: %s", path)
+	}
+
+	return nil
+}
 
 // CleanEmailList trims whitespace from email addresses and removes empty elements.
 // Objectives: Normalize recipient email address slices before MIME envelope construction.
@@ -65,6 +135,7 @@ func LoadRecipientList(path string) ([]string, error) {
 
 // LoadAttachmentList reads a text file containing attachment file paths (one per line).
 // Functionality: Reads file paths line-by-line using bufio.Scanner, trimming trailing \r\n line endings and skipping comment lines starting with #.
+// Security: Validates each path to prevent path traversal attacks.
 func LoadAttachmentList(path string) ([]string, error) {
 	// #nosec G304
 	file, err := os.Open(path)
@@ -75,7 +146,9 @@ func LoadAttachmentList(path string) ([]string, error) {
 
 	var files []string
 	scanner := bufio.NewScanner(file)
+	lineNum := 0
 	for scanner.Scan() {
+		lineNum++
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -83,6 +156,9 @@ func LoadAttachmentList(path string) ([]string, error) {
 		for _, item := range strings.Split(line, ",") {
 			item = strings.TrimSpace(item)
 			if item != "" && !strings.HasPrefix(item, "#") {
+				if err := ValidateFilePath(item); err != nil {
+					return nil, fmt.Errorf("line %d: %w", lineNum, err)
+				}
 				files = append(files, item)
 			}
 		}

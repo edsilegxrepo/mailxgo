@@ -11,8 +11,6 @@
 // Functions in cli.go and mailer.go evaluate error conditions and invoke osExit(ExitErrCode), returning numeric status codes to the parent process.
 package mailxgo
 
-import "os"
-
 // Granular exit codes for mailxgo CLI diagnostics and process automation.
 // Objectives: Allow enterprise job schedulers (Control-M, Tivoli, Cron) to programmatically handle distinct failure modes.
 const (
@@ -26,5 +24,3 @@ const (
 	ExitErrSend   = 8 // ExitErrSend indicates SMTP dial or payload transmission error.
 )
 
-// ExitFunc points to os.Exit by default; intercepted during unit tests.
-var ExitFunc = os.Exit

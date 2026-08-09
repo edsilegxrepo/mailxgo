@@ -15,6 +15,7 @@
 package mailxgo
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -25,6 +26,59 @@ import (
 	"github.com/wneessen/go-mail"
 	mailsmtp "github.com/wneessen/go-mail/smtp"
 )
+
+// ErrorType classifies SMTP errors for granular exit code handling.
+type ErrorType int
+
+const (
+	ErrorTypeUnknown ErrorType = iota
+	ErrorTypeTLS
+	ErrorTypeAuth
+	ErrorTypeConnection
+	ErrorTypeSend
+)
+
+// ClassifyError analyzes an error message and returns the appropriate error type.
+func ClassifyError(err error) ErrorType {
+	if err == nil {
+		return ErrorTypeUnknown
+	}
+	errStr := strings.ToLower(err.Error())
+
+	// TLS-related errors
+	if strings.Contains(errStr, "tls") ||
+		strings.Contains(errStr, "certificate") ||
+		strings.Contains(errStr, "x509") ||
+		strings.Contains(errStr, "handshake") ||
+		strings.Contains(errStr, "ssl") {
+		return ErrorTypeTLS
+	}
+
+	// Authentication errors
+	if strings.Contains(errStr, "auth") ||
+		strings.Contains(errStr, "535") ||
+		strings.Contains(errStr, "534") ||
+		strings.Contains(errStr, "530") ||
+		strings.Contains(errStr, "credential") ||
+		strings.Contains(errStr, "login") ||
+		strings.Contains(errStr, "password") ||
+		strings.Contains(errStr, "username") {
+		return ErrorTypeAuth
+	}
+
+	// Connection errors
+	if strings.Contains(errStr, "dial") ||
+		strings.Contains(errStr, "connection") ||
+		strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "refused") ||
+		strings.Contains(errStr, "unreachable") ||
+		strings.Contains(errStr, "reset") ||
+		strings.Contains(errStr, "eof") {
+		return ErrorTypeConnection
+	}
+
+	return ErrorTypeSend
+}
 
 // clientSender defines an interface abstraction over go-mail.Client for unit testing.
 type clientSender interface {
@@ -71,6 +125,9 @@ type EmailParams struct {
 	InlineAttachments []string
 	Headers           map[string]string
 	TLSMode           string
+	TLSCACert         string // Path to CA certificate file (PEM format)
+	TLSCADir          string // Path to directory containing CA certificates
+	TLSFingerprint    string // SHA256 fingerprint to pin (hex encoded, with or without colons)
 	NoAuth            bool
 	LogFile           string
 	Retries           int
@@ -87,24 +144,43 @@ type EmailParams struct {
 	Charset           string
 	MaxAttachmentMB   int
 	NDJSONOutput      bool
+	NoLogRecipients   bool
+	Context           context.Context
 }
 
 // JSONResult represents the structured telemetry output payload for email dispatch execution.
 type JSONResult struct {
-	Status     string   `json:"status"`
-	Timestamp  string   `json:"timestamp"`
-	SMTPServer string   `json:"smtp_server"`
-	SMTPPort   int      `json:"smtp_port"`
-	From       string   `json:"from"`
-	To         []string `json:"to"`
-	Subject    string   `json:"subject"`
-	Attempts   int      `json:"attempts"`
-	Error      string   `json:"error,omitempty"`
+	Status     string    `json:"status"`
+	Timestamp  string    `json:"timestamp"`
+	SMTPServer string    `json:"smtp_server"`
+	SMTPPort   int       `json:"smtp_port"`
+	From       string    `json:"from"`
+	To         []string  `json:"to"`
+	Subject    string    `json:"subject"`
+	Attempts   int       `json:"attempts"`
+	Error      string    `json:"error,omitempty"`
+	ErrorType  ErrorType `json:"error_type,omitempty"`
 }
 
 // SendEmail transmits an email according to the specified EmailParams options.
-// Data Flow: Validates payload boundaries -> Constructs MIME message -> Configures TLS/Auth -> Dial & Send retry loop -> Audit Logging & Output.
+// Data Flow: Decrypts secrets -> Validates payload boundaries -> Constructs MIME message -> Configures TLS/Auth -> Dial & Send retry loop -> Audit Logging & Output.
 func SendEmail(params EmailParams) (*JSONResult, error) {
+	// Decrypt secrets if encrypted with secretprotector (v1:gcm: prefix)
+	if params.Password != "" {
+		if decrypted, err := DecryptSecret(params.Password, ""); err == nil {
+			params.Password = decrypted
+		} else if IsEncryptedSecret(params.Password) {
+			return nil, fmt.Errorf("failed to decrypt password: %w", err)
+		}
+	}
+	if params.Token != "" {
+		if decrypted, err := DecryptSecret(params.Token, ""); err == nil {
+			params.Token = decrypted
+		} else if IsEncryptedSecret(params.Token) {
+			return nil, fmt.Errorf("failed to decrypt OAuth2 token: %w", err)
+		}
+	}
+
 	// Create a new message
 	m := mail.NewMsg()
 
@@ -126,12 +202,18 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 	if len(params.To) == 0 {
 		return nil, fmt.Errorf("at least one valid To recipient is required")
 	}
+	if err := ValidateEmailList(params.To); err != nil {
+		return nil, fmt.Errorf("invalid To recipient: %w", err)
+	}
 	if err := m.To(params.To...); err != nil {
 		return nil, fmt.Errorf("failed to set To recipients: %w", err)
 	}
 
 	params.CC = CleanEmailList(params.CC)
 	if len(params.CC) > 0 {
+		if err := ValidateEmailList(params.CC); err != nil {
+			return nil, fmt.Errorf("invalid CC recipient: %w", err)
+		}
 		if err := m.Cc(params.CC...); err != nil {
 			return nil, fmt.Errorf("failed to set CC recipients: %w", err)
 		}
@@ -139,6 +221,9 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 
 	params.BCC = CleanEmailList(params.BCC)
 	if len(params.BCC) > 0 {
+		if err := ValidateEmailList(params.BCC); err != nil {
+			return nil, fmt.Errorf("invalid BCC recipient: %w", err)
+		}
 		if err := m.Bcc(params.BCC...); err != nil {
 			return nil, fmt.Errorf("failed to set BCC recipients: %w", err)
 		}
@@ -163,14 +248,7 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 		m.SetBodyString(mail.TypeTextPlain, params.Body)
 	}
 
-	// Add Attachments
-	for _, file := range params.Attachments {
-		if file != "" {
-			m.AttachFile(file)
-		}
-	}
-
-	// Max Attachment Size Guard
+	// Max Attachment Size Guard (check BEFORE attaching to fail fast)
 	if params.MaxAttachmentMB > 0 {
 		var totalBytes int64
 		for _, file := range params.Attachments {
@@ -183,9 +261,15 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 		}
 		maxBytes := int64(params.MaxAttachmentMB) * 1024 * 1024
 		if totalBytes > maxBytes {
-			errStr := fmt.Sprintf("total attachment size (%.2f MB) exceeds configured maximum limit of %d MB",
+			return nil, fmt.Errorf("total attachment size (%.2f MB) exceeds configured maximum limit of %d MB",
 				float64(totalBytes)/(1024*1024), params.MaxAttachmentMB)
-			return nil, fmt.Errorf("%s", errStr)
+		}
+	}
+
+	// Add Attachments
+	for _, file := range params.Attachments {
+		if file != "" {
+			m.AttachFile(file)
 		}
 	}
 
@@ -260,15 +344,31 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 	}
 
 	// TLS Options
-	// #nosec G402 -- InsecureSkipVerify is configurable via tls-skip mode for internal relays with self-signed certs.
+	// #nosec G402 -- InsecureSkipVerify is configurable via ignore-trust mode for internal relays with self-signed certs.
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: params.TLSMode == "tls-skip",
+		InsecureSkipVerify: params.TLSMode == "ignore-trust",
 		ServerName:         params.SMTPServer,
 		MinVersion:         tls.VersionTLS12,
 	}
 
+	// Custom CA certificate or directory
+	if params.TLSCACert != "" || params.TLSCADir != "" {
+		rootCAs, err := loadCustomCACerts(params.TLSCACert, params.TLSCADir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load custom CA certificates: %w", err)
+		}
+		tlsConfig.RootCAs = rootCAs
+		tlsConfig.InsecureSkipVerify = false // Force verification when custom CA is provided
+	}
+
+	// Certificate fingerprint pinning
+	if params.TLSFingerprint != "" {
+		tlsConfig.VerifyPeerCertificate = createFingerprintVerifier(params.TLSFingerprint)
+		tlsConfig.InsecureSkipVerify = true // Skip default verification, use fingerprint instead
+	}
+
 	switch params.TLSMode {
-	case "tls-skip":
+	case "ignore-trust":
 		clientOptions = append(clientOptions, mail.WithTLSConfig(tlsConfig))
 		clientOptions = append(clientOptions, mail.WithTLSPolicy(mail.TLSMandatory))
 	case "none":
@@ -283,8 +383,12 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 	}
 
 	// Authentication Options
-	if params.NoAuth || (params.Username == "" && params.Password == "" && !params.OAuth2 && (params.AuthType == "" || strings.EqualFold(params.AuthType, "auto"))) {
-		clientOptions = append(clientOptions, mail.WithSMTPAuthCustom(&noAuthSASL{}))
+	if params.NoAuth {
+		// Use SMTPAuthNoAuth - don't attempt any authentication
+		clientOptions = append(clientOptions, mail.WithSMTPAuth(mail.SMTPAuthNoAuth))
+	} else if params.Username == "" && params.Password == "" && !params.OAuth2 && (params.AuthType == "" || strings.EqualFold(params.AuthType, "auto")) {
+		// No credentials provided, use NoAuth
+		clientOptions = append(clientOptions, mail.WithSMTPAuth(mail.SMTPAuthNoAuth))
 	} else if params.OAuth2 || strings.EqualFold(params.AuthType, "xoauth2") {
 		clientOptions = append(clientOptions, mail.WithSMTPAuth(mail.SMTPAuthXOAUTH2))
 		if params.Username != "" {
@@ -314,6 +418,12 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 
 	clientOptions = append(clientOptions, mail.WithPort(params.SMTPPort))
 
+	// Use background context if none provided
+	ctx := params.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	attempts := 0
 	var lastErr error
 	maxAttempts := 1 + params.Retries
@@ -322,6 +432,14 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 	}
 
 	for i := 0; i < maxAttempts; i++ {
+		// Check for context cancellation before each attempt
+		select {
+		case <-ctx.Done():
+			lastErr = fmt.Errorf("operation cancelled: %w", ctx.Err())
+			break
+		default:
+		}
+
 		attempts++
 		c, err := defaultClientFactory(params.SMTPServer, clientOptions...)
 		if err != nil {
@@ -338,7 +456,7 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 		if i < maxAttempts-1 {
 			delay := params.RetryDelay
 			if delay <= 0 {
-				delay = 5
+				delay = DefaultRetryDelay
 			}
 			retryMsg := fmt.Sprintf("Attempt %d/%d failed: %v. Retrying in %ds...\n", attempts, maxAttempts, lastErr, delay)
 			if !params.JSONOutput && !params.NDJSONOutput {
@@ -347,7 +465,14 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 			if params.LogFile != "" {
 				logAttempt(params.LogFile, retryMsg)
 			}
-			timeSleep(time.Duration(delay) * time.Second)
+
+			// Context-aware sleep
+			select {
+			case <-ctx.Done():
+				lastErr = fmt.Errorf("operation cancelled during retry wait: %w", ctx.Err())
+				break
+			case <-time.After(time.Duration(delay) * time.Second):
+			}
 		}
 	}
 
@@ -355,6 +480,7 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 
 	var res JSONResult
 	if lastErr != nil {
+		errType := ClassifyError(lastErr)
 		logAudit(params.LogFile, timestamp, false, attempts, lastErr.Error(), params)
 		res = JSONResult{
 			Status:     "error",
@@ -366,6 +492,7 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 			Subject:    params.Subject,
 			Attempts:   attempts,
 			Error:      lastErr.Error(),
+			ErrorType:  errType,
 		}
 	} else {
 		logAudit(params.LogFile, timestamp, true, attempts, "", params)
@@ -394,7 +521,11 @@ func OutputJSONResult(res JSONResult, jsonOutput bool, ndjsonOutput bool, from s
 		data, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(data))
 	} else if res.Status == "success" {
-		fmt.Printf("Email sent successfully to %s from %s (attempts: %d)\n", strings.Join(to, ", "), from, attempts)
+		recipients := ""
+		if len(to) > 0 {
+			recipients = strings.Join(to, ", ")
+		}
+		fmt.Printf("Email sent successfully to %s from %s (attempts: %d)\n", recipients, from, attempts)
 	}
 }
 
@@ -419,13 +550,19 @@ func logAudit(logFile string, timestamp string, success bool, attempts int, errS
 	}
 	defer func() { _ = f.Close() }()
 
+	// Privacy mode: redact recipient addresses
+	recipients := strings.Join(params.To, ", ")
+	if params.NoLogRecipients {
+		recipients = fmt.Sprintf("[%d recipients redacted]", len(params.To))
+	}
+
 	if success {
 		entry := fmt.Sprintf("[%s] SUCCESS: Email sent successfully to [%s] via %s:%d (attempts: %d)\n",
-			timestamp, strings.Join(params.To, ", "), params.SMTPServer, params.SMTPPort, attempts)
+			timestamp, recipients, params.SMTPServer, params.SMTPPort, attempts)
 		_, _ = f.WriteString(entry)
 	} else {
 		entry := fmt.Sprintf("[%s] ERROR: Email sending failed to [%s] via %s:%d after %d attempts: %s\n",
-			timestamp, strings.Join(params.To, ", "), params.SMTPServer, params.SMTPPort, attempts, errStr)
+			timestamp, recipients, params.SMTPServer, params.SMTPPort, attempts, errStr)
 		_, _ = f.WriteString(entry)
 	}
 }
