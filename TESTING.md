@@ -150,6 +150,7 @@ sequenceDiagram
 | **Integration** | `TestLive_TLSFingerprintValidation` | E2E test of fingerprint format validation. | PASS on valid fingerprints; error on invalid format. |
 | **Integration** | `TestLive_DiagnosticsWithTLSOptions` | E2E test of diagnostics with TLS options. | PASS on diagnostics with `ignore-trust` and CA cert. |
 | **Integration** | `TestLive_CLI_TLSOptions` | E2E test of CLI with TLS config options. | PASS on CLI send with TLS mode in config file. |
+| **OAuth2** | `TestLive_OAuth2_XOAUTH2Authentication` | E2E test of XOAUTH2 authentication via OAuth2 mock server. Subtests: XOAUTH2_ValidToken, XOAUTH2_TestToken, XOAUTH2_EncryptedToken, CLI_OAuth2. | PASS on successful XOAUTH2 auth with valid tokens, test tokens, encrypted tokens, and CLI flags. |
 | **CLI Binary** | `TestMainCompiles` | Asserts `cmd/mailxgo` package compiles without errors. | PASS on clean compilation. |
 
 ---
@@ -217,6 +218,23 @@ The test suite automatically:
 2. Attempts to start a Mailpit Docker container if port is free.
 3. Falls back to embedded ESMTP server if Docker is unavailable.
 4. Logs which backend is active for each test run.
+
+### 6.4 OAuth2 Mock Server Integration
+For testing XOAUTH2 authentication, a custom OAuth2 mock SMTP server is built using `emersion/go-smtp`:
+
+- **Location:** `test/oauth2-mock/`
+- **Port:** `1026` (separate from Mailpit on `1025`)
+- **Supported Mechanisms:** XOAUTH2, PLAIN, LOGIN
+- **Token Validation:** Accepts tokens starting with `ya29.` (Google format), `test` prefix, or any token >= 10 chars
+
+The mock server validates XOAUTH2 token format (`user=<email>\x01auth=Bearer <token>\x01\x01`) without requiring real OAuth2 provider credentials.
+
+```bash
+# Build and run manually for debugging
+cd test/oauth2-mock
+go build -o oauth2-smtp-mock .
+./oauth2-smtp-mock
+```
 
 ---
 

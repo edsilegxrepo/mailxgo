@@ -1805,3 +1805,194 @@ func generateTestCertDERIntegration(t *testing.T) []byte {
 
 	return certDER
 }
+
+// =============================================================================
+// E2E TEST: OAuth2 XOAUTH2 Authentication
+// =============================================================================
+
+const (
+	oauth2MockPort      = 1026
+	oauth2ContainerName = "mailxgo-oauth2-mock"
+)
+
+var (
+	oauth2Ready     bool
+	oauth2SetupOnce sync.Once
+)
+
+// setupOAuth2Mock starts the OAuth2 mock SMTP server for XOAUTH2 testing.
+func setupOAuth2Mock(t *testing.T) bool {
+	t.Helper()
+
+	oauth2SetupOnce.Do(func() {
+		addr := fmt.Sprintf("%s:%d", smtpHost, oauth2MockPort)
+
+		// Check if already running
+		if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
+			conn.Close()
+			oauth2Ready = true
+			t.Logf("OAuth2 mock server already running on %s", addr)
+			return
+		}
+
+		// Try to start using Docker
+		_, _ = runDockerCmd("rm", "-f", oauth2ContainerName)
+
+		// Build and run the OAuth2 mock container
+		t.Logf("Building OAuth2 mock server container...")
+		buildOut, buildErr := runDockerCmd("build", "-t", "mailxgo-oauth2-mock", "./test/oauth2-mock")
+		if buildErr != nil {
+			t.Logf("Docker build failed: %v\n%s", buildErr, string(buildOut))
+			t.Logf("OAuth2 mock requires Docker - skipping OAuth2 tests")
+			return
+		}
+
+		t.Logf("Starting OAuth2 mock server container...")
+		_, runErr := runDockerCmd("run", "-d", "--name", oauth2ContainerName,
+			"-p", fmt.Sprintf("%d:1025", oauth2MockPort),
+			"-e", "SMTP_ADDR=:1025",
+			"mailxgo-oauth2-mock")
+		if runErr != nil {
+			t.Logf("Docker run failed: %v", runErr)
+			return
+		}
+
+		// Wait for container readiness
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
+				conn.Close()
+				oauth2Ready = true
+				t.Logf("OAuth2 mock server ready on %s", addr)
+				return
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		t.Logf("OAuth2 mock server failed to start within timeout")
+	})
+
+	return oauth2Ready
+}
+
+func TestLive_OAuth2_XOAUTH2Authentication(t *testing.T) {
+	if !setupOAuth2Mock(t) {
+		t.Skip("OAuth2 mock server not available - requires Docker")
+	}
+
+	t.Cleanup(func() {
+		_, _ = runDockerCmd("rm", "-f", oauth2ContainerName)
+	})
+
+	// Test 1: XOAUTH2 with valid token
+	t.Run("XOAUTH2_ValidToken", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   oauth2MockPort,
+			Username:   "oauth-user@example.com",
+			OAuth2:     true,
+			Token:      "ya29.valid-oauth2-access-token-for-testing",
+			From:       "oauth2-sender@example.com",
+			To:         []string{"recipient@example.com"},
+			Subject:    "OAuth2 XOAUTH2 Test",
+			Body:       "Testing XOAUTH2 authentication",
+			TLSMode:    "none",
+		}
+
+		res, err := mailxgo.SendEmail(params)
+		if err != nil {
+			t.Fatalf("SendEmail with XOAUTH2 failed: %v", err)
+		}
+		if res.Status != "success" {
+			t.Errorf("expected status success, got %s", res.Status)
+		}
+		t.Logf("XOAUTH2 authentication successful")
+	})
+
+	// Test 2: XOAUTH2 with test token prefix
+	t.Run("XOAUTH2_TestToken", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   oauth2MockPort,
+			Username:   "test-user@example.com",
+			OAuth2:     true,
+			Token:      "test-token-abc123",
+			From:       "oauth2-test@example.com",
+			To:         []string{"recipient@example.com"},
+			Subject:    "OAuth2 Test Token",
+			Body:       "Testing with test token prefix",
+			TLSMode:    "none",
+		}
+
+		res, err := mailxgo.SendEmail(params)
+		if err != nil {
+			t.Fatalf("SendEmail with test token failed: %v", err)
+		}
+		if res.Status != "success" {
+			t.Errorf("expected status success, got %s", res.Status)
+		}
+	})
+
+	// Test 3: XOAUTH2 with encrypted token via secretprotector
+	t.Run("XOAUTH2_EncryptedToken", func(t *testing.T) {
+		masterKey := "0123456789abcdef0123456789abcdef"
+		t.Setenv("SECRETPROTECTOR_MASTER_KEY", masterKey)
+
+		ctx := context.Background()
+		testToken := "ya29.encrypted-oauth2-token-here"
+
+		encrypted, err := libsecsecrets.Encrypt(ctx, testToken, []byte(masterKey))
+		if err != nil {
+			t.Skipf("Secretprotector encryption not available: %v", err)
+		}
+
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   oauth2MockPort,
+			Username:   "encrypted-oauth@example.com",
+			OAuth2:     true,
+			Token:      encrypted, // v1:gcm:... encrypted token
+			From:       "oauth2-encrypted@example.com",
+			To:         []string{"recipient@example.com"},
+			Subject:    "OAuth2 Encrypted Token Test",
+			Body:       "Testing XOAUTH2 with secretprotector encrypted token",
+			TLSMode:    "none",
+		}
+
+		res, err := mailxgo.SendEmail(params)
+		if err != nil {
+			t.Fatalf("SendEmail with encrypted OAuth2 token failed: %v", err)
+		}
+		if res.Status != "success" {
+			t.Errorf("expected status success, got %s", res.Status)
+		}
+		t.Logf("XOAUTH2 with encrypted token successful")
+	})
+
+	// Test 4: CLI with OAuth2 flags
+	t.Run("CLI_OAuth2", func(t *testing.T) {
+		cmd := exec.Command("go", "run", "./cmd/mailxgo",
+			"--smtp-server", smtpHost,
+			"--smtp-port", fmt.Sprintf("%d", oauth2MockPort),
+			"--oauth2",
+			"--smtp-username", "cli-oauth@example.com",
+			"--token", "ya29.cli-oauth2-token",
+			"--from-email", "cli-oauth2@example.com",
+			"--to-email", "recipient@example.com",
+			"--subject", "CLI OAuth2 Test",
+			"--body", "Testing CLI with OAuth2 flags",
+			"--tls-mode", "none",
+			"--json-output",
+		)
+		cmd.Dir = "."
+
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("CLI with OAuth2 failed: %v\nOutput: %s", err, string(out))
+		}
+
+		if !strings.Contains(string(out), `"status": "success"`) && !strings.Contains(string(out), `"status":"success"`) {
+			t.Errorf("Expected success status in output, got: %s", string(out))
+		}
+		t.Logf("CLI OAuth2 test passed")
+	})
+}
