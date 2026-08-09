@@ -1,9 +1,22 @@
+// Package main - mailxgo Executable Usage Printer
+//
+// OBJECTIVES:
+// Provide standalone CLI help menu text printing and exit code 1 invocation for package main executions.
+//
+// CORE COMPONENTS:
+// - Usage: Prints CLI option flags reference to os.Stderr and terminates process via osExit(1).
+// - osExit: Interceptable exit function variable for unit testing package main.
+//
+// FUNCTIONALITY & DATA FLOW:
+// CLI Invocation (no args) -> Usage() -> Fprintf(os.Stderr) -> osExit(1).
 package main
 
 import (
 	"fmt"
 	"os"
 )
+
+var osExit = os.Exit
 
 func Usage() {
 	fmt.Fprintf(os.Stderr, "Usage: %s [options]\n", os.Args[0])
@@ -49,5 +62,5 @@ func Usage() {
 	fmt.Fprintln(os.Stderr, "  -v, --version             Application version")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  Ensure all required flags are provided.")
-	os.Exit(1)
+	osExit(1)
 }

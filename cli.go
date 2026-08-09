@@ -1,3 +1,16 @@
+// Package mailxgo - CLI Argument Engine & Precedence Evaluator
+//
+// OBJECTIVES:
+// Provide command-line flag definitions, 6-tier parameter precedence resolution, configuration auto-detection, and CLI execution routing.
+//
+// CORE COMPONENTS:
+// - HeaderFlags: Custom flag.Value implementation for parsing repeatable -H "Key: Value" headers with CRLF injection validation.
+// - PrintUsage: Help text printer rendering flag reference menu to os.Stderr.
+// - RunCLI: Main CLI handler orchestrating argument parsing, configuration loading, environment fallback lookup, parameter priority evaluation, and dispatch routing.
+// - priorityString / priorityInt: Precedence evaluation helpers resolving the highest priority parameter across low-to-high ordered slices.
+//
+// FUNCTIONALITY & DATA FLOW:
+// CLI os.Args -> flag.FlagSet parse -> Auto-detect/Load config file -> Read environment variables -> Evaluate 6-tier priority hierarchy -> Construct EmailParams -> Route to RunDiagnostics or SendEmail.
 package mailxgo
 
 import (
@@ -8,9 +21,13 @@ import (
 	"strings"
 )
 
-var Version = "dev" // Application version
+var (
+	Version = "dev" // Application version
+	osExit  = os.Exit
+)
 
 // Custom flag.Value implementation for multi-value headers (-H "Key: Value")
+// Objectives: Parses repeatable CLI -H flags into a key-value map with CRLF injection sanitization.
 type HeaderFlags map[string]string
 
 func (h *HeaderFlags) String() string {
@@ -21,6 +38,8 @@ func (h *HeaderFlags) String() string {
 	return strings.Join(parts, ", ")
 }
 
+// Set validates and stores custom MIME header key-value pairs.
+// Security: Rejects header names or values containing \r or \n carriage return/newline control characters (RFC 5322).
 func (h *HeaderFlags) Set(value string) error {
 	parts := strings.SplitN(value, ":", 2)
 	if len(parts) != 2 {
@@ -90,7 +109,7 @@ func PrintUsage() {
 
 // RunCLI parses command-line arguments and executes Mail2Go diagnostics or email dispatch.
 func RunCLI(args []string) {
-	fs := flag.NewFlagSet("mail2go", flag.ExitOnError)
+	fs := flag.NewFlagSet("mail2go", flag.ContinueOnError)
 
 	var (
 		smtpServer string
@@ -143,7 +162,7 @@ func RunCLI(args []string) {
 		printCerts bool
 		debug      bool
 
-		headers HeaderFlags = make(HeaderFlags)
+		headers = make(HeaderFlags)
 
 		showVersion bool
 
@@ -238,7 +257,8 @@ func RunCLI(args []string) {
 	fs.StringVar(&importance, "importance", "", "Email priority/importance (high, normal, low)")
 	fs.BoolVar(&jsonOutput, "json-output", false, "Output result in machine-readable JSON format")
 	fs.BoolVar(&ndjsonOutput, "ndjson-output", false, "Output result in single-line NDJSON format")
-	fs.BoolVar(&ndjsonOutput, "ndjson", false, "Output result in single-line NDJSON format")
+	var ndjsonAlias bool
+	fs.BoolVar(&ndjsonAlias, "ndjson", false, "Output result in single-line NDJSON format")
 
 	fs.BoolVar(&info, "info", false, "Run pre-flight SMTP gateway diagnostics and exit")
 	fs.BoolVar(&diag, "diag", false, "Run pre-flight SMTP gateway diagnostics and exit")
@@ -295,12 +315,14 @@ func RunCLI(args []string) {
 
 	if err := fs.Parse(args); err != nil {
 		PrintUsage()
-		os.Exit(1)
+		osExit(ExitErrUsage)
+		return
 	}
 
 	if showVersion || showVersionShort {
 		fmt.Printf("mailxgo Version: %s\n", Version)
-		os.Exit(0)
+		osExit(ExitSuccess)
+		return
 	}
 
 	configFile = priorityString([]string{configFile, configFileShort})
@@ -324,7 +346,8 @@ func RunCLI(args []string) {
 		config, err = LoadConfig(configFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading config file %s: %v\n", configFile, err)
-			os.Exit(1)
+			osExit(ExitErrConfig)
+			return
 		}
 	}
 
@@ -352,6 +375,7 @@ func RunCLI(args []string) {
 		envToken = os.Getenv("SMTP_OAUTH_TOKEN")
 	}
 
+	// Priority: Config file < Environment variables < CLI flags (last element wins)
 	useProvider = priorityString([]string{config.Use, useProvider, useProviderShort})
 	if useProvider != "" {
 		if preset, ok := ResolveProviderPreset(useProvider); ok {
@@ -375,9 +399,9 @@ func RunCLI(args []string) {
 		smtpPort = 587
 	}
 
-	username = priorityString([]string{envUser, config.SMTPUsername, username, usernameShort})
-	password = priorityString([]string{envPass, config.SMTPPassword, password, passwordShort})
-	token = priorityString([]string{envToken, config.Token, token})
+	username = priorityString([]string{config.SMTPUsername, envUser, username, usernameShort})
+	password = priorityString([]string{config.SMTPPassword, envPass, password, passwordShort})
+	token = priorityString([]string{config.Token, envToken, token})
 	authType = priorityString([]string{config.AuthType, authType})
 	oauth2Mode = config.OAuth2 || oauth2Mode
 	charset = priorityString([]string{config.Charset, charset, charsetShort})
@@ -397,8 +421,8 @@ func RunCLI(args []string) {
 	listFile = priorityString([]string{listFile, listFileShort})
 	replyTo = priorityString([]string{replyTo, replyToShort})
 
-	subject = priorityString([]string{subject, subjectShort})
-	body = priorityString([]string{body, bodyShort})
+	subject = priorityString([]string{config.Subject, subject, subjectShort})
+	body = priorityString([]string{config.Body, body, bodyShort})
 
 	attachmentsFiles = priorityString([]string{attachmentsFiles, attachmentsFilesShort})
 	inlineAttachmentsFiles = priorityString([]string{inlineAttachmentsFiles, inlineAttachmentsFilesShort})
@@ -406,7 +430,7 @@ func RunCLI(args []string) {
 	attachmentsDir = priorityString([]string{config.AttachmentsDir, attachmentsDir, attachmentsDirShort})
 	maxAttachmentMB = priorityInt([]int{config.MaxAttachmentMB, maxAttachmentMB, maxAttachmentMBShort})
 
-	bodyFile = priorityString([]string{bodyFile, bodyFileShort})
+	bodyFile = priorityString([]string{config.BodyFile, bodyFile, bodyFileShort})
 	logFile = priorityString([]string{config.LogFile, logFile, logFileShort})
 
 	retries = priorityInt([]int{config.Retries, retries, retriesShort})
@@ -422,7 +446,7 @@ func RunCLI(args []string) {
 	importance = priorityString([]string{config.Importance, importance, importanceShort})
 	dsnReturn = priorityString([]string{config.DSNReturn, dsnReturn})
 	jsonOutput = config.JSONOutput || jsonOutput || jsonOutputShort
-	ndjsonOutput = config.NDJSONOutput || ndjsonOutput || ndjsonOutputShort
+	ndjsonOutput = config.NDJSONOutput || ndjsonOutput || ndjsonAlias || ndjsonOutputShort
 	debug = config.Debug || debug
 	info = config.Info || info || infoShort || diag
 	printCerts = config.PrintCerts || printCerts
@@ -438,7 +462,8 @@ func RunCLI(args []string) {
 		if smtpServer == "" {
 			fmt.Fprintln(os.Stderr, "Error: SMTP server (--smtp-server) is required for diagnostics.")
 			PrintUsage()
-			os.Exit(1)
+			osExit(ExitErrUsage)
+			return
 		}
 		diagParams := EmailParams{
 			SMTPServer:   smtpServer,
@@ -450,15 +475,18 @@ func RunCLI(args []string) {
 			NDJSONOutput: ndjsonOutput,
 		}
 		if _, err := RunDiagnostics(diagParams, printCerts); err != nil {
-			os.Exit(1)
+			osExit(ExitErrDNS)
+			return
 		}
-		os.Exit(0)
+		osExit(ExitSuccess)
+		return
 	}
 
 	if smtpServer == "" || fromEmail == "" || (toEmail == "" && listFile == "") || subject == "" || (body == "" && bodyFile == "") {
 		fmt.Fprintln(os.Stderr, "Error: Missing required arguments for sending email.")
 		PrintUsage()
-		os.Exit(1)
+		osExit(ExitErrUsage)
+		return
 	}
 
 	var attachmentPaths []string
@@ -469,7 +497,8 @@ func RunCLI(args []string) {
 		listFileAttachments, err := LoadAttachmentList(attachmentsList)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading attachment list file %s: %v\n", attachmentsList, err)
-			os.Exit(1)
+			osExit(ExitErrFileIO)
+			return
 		}
 		attachmentPaths = append(attachmentPaths, listFileAttachments...)
 	}
@@ -477,7 +506,8 @@ func RunCLI(args []string) {
 		dirFiles, err := ScanAttachmentDir(attachmentsDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error scanning attachment directory %s: %v\n", attachmentsDir, err)
-			os.Exit(1)
+			osExit(ExitErrFileIO)
+			return
 		}
 		attachmentPaths = append(attachmentPaths, dirFiles...)
 	}
@@ -506,7 +536,8 @@ func RunCLI(args []string) {
 		listRecipients, err := LoadRecipientList(listFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading recipient list file %s: %v\n", listFile, err)
-			os.Exit(1)
+			osExit(ExitErrFileIO)
+			return
 		}
 		toEmails = append(toEmails, listRecipients...)
 	}
@@ -561,12 +592,15 @@ func RunCLI(args []string) {
 		if !jsonOutput && !ndjsonOutput {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 		}
-		os.Exit(1)
+		osExit(ExitErrSend)
+		return
 	}
 }
 
+// priorityString resolves parameter precedence across a slice of strings ordered from lowest to highest priority.
+// Functionality: Iterates through the slice and returns the last non-empty string element.
 func priorityString(strings []string) string {
-	var result = ""
+	result := ""
 	for _, val := range strings {
 		if val != "" {
 			result = val
@@ -575,8 +609,10 @@ func priorityString(strings []string) string {
 	return result
 }
 
+// priorityInt resolves parameter precedence across a slice of integers ordered from lowest to highest priority.
+// Functionality: Iterates through the slice and returns the last non-zero integer element.
 func priorityInt(ints []int) int {
-	var result = 0
+	result := 0
 	for _, val := range ints {
 		if val != 0 {
 			result = val
