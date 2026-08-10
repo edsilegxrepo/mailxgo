@@ -7,11 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v1.3.1] - 2026-08-10
+
+### Added
+- **Single-Recipient Batch Mode**: Added `--single-recipient` flag to send individual emails per recipient with rate limiting support for high-volume distribution lists.
+- **Single-Attachment Batch Mode**: Added `--single-attachment` flag to send separate emails per attachment with `[N/Total]` subject prefix for large file transfers.
+- **Max Recipients Guard**: Added `--max-recipients` flag (default 1000) to prevent memory exhaustion from oversized recipient lists.
+- **TLS Trust Options**:
+  - Added `--tls-ca-cert` flag to load custom CA certificate from PEM file.
+  - Added `--tls-ca-dir` flag to load CA certificates from directory (`.pem`, `.crt`, `.cer` files).
+  - Added `--tls-fingerprint` flag for SHA256 certificate fingerprint pinning.
+  - Added `ignore-trust` TLS mode for self-signed certificates on internal relays.
+- **Secretprotector Integration**: Added AES-256-GCM encrypted credential support via `v1:gcm:` prefix with `SECRETPROTECTOR_MASTER_KEY` environment variable.
+- **Live Diagnostics Tests**: Added `TestLive_RunDiagnostics` and `TestLive_OutputDiagReport` E2E tests against Mailpit SMTP server.
+- **Comprehensive Unit Tests**: Added tests for `BuildTLSConfig`, `noAuthSASL`, `ClassifyError`, and authentication modes (`noauth`, `xoauth2`, `cram-md5`).
+- **JSON List Format**: Added `--list-format` flag supporting `text` (default) and `json` formats for `--recipient-list` and `--attachments-list` files.
+- **Renamed Flag**: Renamed `--list` to `--recipient-list` for clarity and consistency with `--attachments-list`.
+  - Simple JSON array: `["alice@example.com", "bob@example.com"]`
+  - Object array with per-recipient vars: `[{"email": "alice@example.com", "vars": {"name": "Alice"}}]`
+
+### Changed
+- **Test Coverage**: Increased unit test coverage from 76.6% to 82.5%, integration test coverage to 86.7%.
+
+### Security
+- **TLS Session Resumption Security**: Added `VerifyConnection` callback to fingerprint pinning to ensure certificate verification runs on resumed TLS sessions, to avoid a potential TLS session resumption bypass.
+- **Directory Permissions**: Changed default directory creation permissions from `0755` to `0750` for improved security on log and EML archive directories.
+- Added path validation and sanitization to pre-validate file operations.
+
+---
+
 ## [v1.3.0] - 2026-08-08
 
 ### Added
 - **SASL Authentication Suite**: Added `--auth-type` flag supporting `plain`, `login`, `cram-md5`, `xoauth2`, and `auto` negotiation mechanisms.
-- **XOAUTH2 Access Token Support**: Added `--oauth2` mode and `--token` flag with `SMTP_OAUTH_TOKEN` / `MAIL2GO_OAUTH_TOKEN` environment variable fallbacks.
+- **XOAUTH2 Access Token Support**: Added `--oauth2` mode and `--token` flag with `MAILXGO_OAUTH_TOKEN` environment variable fallback.
 - **Corporate & Consumer Mail Provider Presets**: Added `--use` flag with pre-configured settings for `office365`, `googleworkspace`, `aws-ses` (regions: `us-east-1`, `us-west-2`, `eu-west-1`), `sendgrid`, `mailgun`, `postmark`, `fastmail`, `protonmail`, `gmail`, `outlook`, `yahoo`, `gmx`, `zoho`, and `aol`.
 - **Advanced Attachment Engine**:
   - Added Attachment List Files (`--attachments-list` / `-lst-af`).
@@ -23,14 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added Carbon Copy (`--cc`) and Blind Carbon Copy (`--bcc`) recipient flags and JSON config fields.
   - Added Friendly Sender Display Name formatting (`--from-name` / `-fn`).
   - Added Custom MIME Headers (`-H` / `--header`) with CRLF injection validation.
-  - Added Recipient List File loading (`-lst` / `--list`).
+  - Added Recipient List File loading (`--recipient-list`).
   - Added Dual ISO-8601 Timestamped Execution Audit Logging (`-log` / `--log-file`).
   - Added Automatic Retries & Timeout Control (`--retries`, `--retry-delay`, `--timeout`).
   - Added Delivery Status Notification requests (`--dsn-notify`, `--dsn-return`).
   - Added Message Priority / Importance (`--importance high|normal|low`).
   - Added Machine-Readable JSON Output (`--json-output` / `-j`).
   - Added Single-Line NDJSON Output (`--ndjson` / `--ndjson-output`) for log aggregators (Splunk, Fluentd, Vector, CloudWatch).
-  - Added Environment Variable secret fallback for passwords (`MAIL2GO_SMTP_PASSWORD`, `SMTP_USER_PASS`) and usernames (`MAIL2GO_SMTP_USERNAME`, `SMTP_USER`).
+  - Added Environment Variable secret support for passwords (`MAILXGO_SMTP_PASSWORD`) and usernames (`MAILXGO_SMTP_USERNAME`).
 
 ### Changed
 - **Modern Go Module Architecture**: Refactored core codebase to expose SMTP transmission (`SendEmail`), pre-flight gateway diagnostics (`RunDiagnostics`), configuration decoder (`LoadConfig`), provider presets (`ResolveProviderPreset`), and file utilities directly via root `package mailxgo` (`github.com/edsilegxrepo/mailxgo`) for programmatic consumption in external Go applications.

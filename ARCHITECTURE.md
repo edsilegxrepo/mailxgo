@@ -23,7 +23,7 @@ graph TD
     SubDiag --> SubCrypto
     SubMailer --> SubExit["Exit Code Definitions (./exitcodes.go)"]
 
-    SubMailer --> ExtMail["github.com/wneessen/go-mail v0.4.0"]
+    SubMailer --> ExtMail["github.com/wneessen/go-mail v0.8.1"]
     SubCrypto --> ExtSecProt["github.com/edsilegxrepo/secretprotector"]
     SubDiag --> NetGo["net / net/smtp / crypto/tls"]
 ```
@@ -33,7 +33,7 @@ graph TD
 * **Deterministic Configuration Precedence:** Parameter evaluation follows a strict six-tier hierarchy:
   $$\text{CLI Short Flags} > \text{CLI Long Flags} > \text{JSON Configuration File} > \text{Environment Variables} > \text{Provider Presets} > \text{Built-in Defaults}$$
 * **Non-Blocking Resource Pre-Validation:** Payload sizes and attachment paths are evaluated prior to establishing network sockets. If payload boundaries exceed limits, execution terminates without initiating remote TCP sessions.
-* **Deterministic Granular Exit Status:** System exit codes are categorized into granular numeric ranges (`ExitSuccess = 0`, `ExitErrUsage = 2`, `ExitErrConfig = 3`, `ExitErrFileIO = 4`, `ExitErrDNS = 5`, `ExitErrTLS = 6`, `ExitErrAuth = 7`, `ExitErrSend = 8`) to allow deterministic process supervision in enterprise job schedulers.
+* **Deterministic Granular Exit Status:** System exit codes are categorized into granular numeric ranges (`ExitSuccess = 0`, `ExitErrUsage = 2`, `ExitErrConfig = 3`, `ExitErrFileIO = 4`, `ExitErrDNS = 5`, `ExitErrTLS = 6`, `ExitErrAuth = 7`, `ExitErrSend = 8`, `ExitErrConnection = 9`) to allow deterministic process supervision in enterprise job schedulers.
 
 ### 1.3 Architectural Assumptions & Edge Cases
 * **Network Infrastructure:** Assumes standard IPv4/IPv6 TCP socket connectivity to target SMTP relays on ports 25, 465, 587, or custom ports.
@@ -116,7 +116,7 @@ sequenceDiagram
 
 ```mermaid
 graph LR
-    mailxgo["mailxgo (package mailxgo)"] --> GoMail["github.com/wneessen/go-mail v0.4.0"]
+    mailxgo["mailxgo (package mailxgo)"] --> GoMail["github.com/wneessen/go-mail v0.8.1"]
     mailxgo --> SecProt["github.com/edsilegxrepo/secretprotector"]
     mailxgo --> StandardNet["net (Go Standard Library)"]
     mailxgo --> StandardSMTP["net/smtp (Go Standard Library)"]
@@ -126,7 +126,7 @@ graph LR
 ```
 
 ### 4.2 Module Inventory
-* **Core Transport Engine:** `github.com/wneessen/go-mail v0.4.0` (Native Go ESMTP implementation, maintained, zero external indirect dependencies).
+* **Core Transport Engine:** `github.com/wneessen/go-mail v0.8.1` (Native Go ESMTP implementation, maintained, zero external indirect dependencies).
 * **Secret Management:** `github.com/edsilegxrepo/secretprotector` (AES-256-GCM credential encryption/decryption).
 * **Standard Library Dependencies:** `net`, `net/smtp`, `crypto/tls`, `crypto/sha256`, `crypto/x509`, `encoding/json`, `encoding/hex`, `os`, `bufio`, `path/filepath`, `strings`, `flag`, `fmt`, `sort`, `strconv`, `time`.
 

@@ -61,20 +61,39 @@ var (
 	testTLSCertDir   string
 )
 
+// isWSL returns true if running via WSL docker (higher latency expected)
+func isWSL() bool {
+	return runtime.GOOS == "windows"
+}
+
+// containerTimeout returns appropriate timeout based on environment
+func containerTimeout() time.Duration {
+	if isWSL() {
+		return 30 * time.Second // WSL + Docker has higher latency
+	}
+	return 15 * time.Second
+}
+
+// dialTimeout returns appropriate dial timeout based on environment
+func dialTimeout() time.Duration {
+	if isWSL() {
+		return 500 * time.Millisecond
+	}
+	return 100 * time.Millisecond
+}
+
 // TestMain provides one-time setup and teardown for the integration test suite.
-// Initializes Mailpit container once for all tests.
 func TestMain(m *testing.M) {
-	// Setup: Start Mailpit container once
+	// Setup: Ensure Mailpit container is running
 	mailpitSetupOnce.Do(func() {
-		mailpitSetupErr = initMailpitContainer()
+		mailpitSetupErr = ensureMailpitContainer()
 	})
 
 	code := m.Run()
 
-	// Teardown: Clean up Mailpit container
-	if mailpitReady {
-		_, _ = runDockerCmd("rm", "-f", containerName)
-	}
+	// Teardown: Stop and remove container
+	_, _ = runDockerCmd("stop", containerName)
+	_, _ = runDockerCmd("rm", "-f", containerName)
 
 	// Clean up TLS cert directory
 	if testTLSCertDir != "" {
@@ -84,41 +103,62 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// initMailpitContainer starts Mailpit with auth support; waits until API is ready.
-func initMailpitContainer() error {
+// ensureMailpitContainer ensures Mailpit container is running with proper lifecycle:
+// 1. If container exists and stopped, start it
+// 2. If container doesn't exist but image exists, create and start
+// 3. If image doesn't exist, pull it, create and start
+func ensureMailpitContainer() error {
 	addr := fmt.Sprintf("%s:%d", smtpHost, smtpPort)
+	imageName := "axllent/mailpit"
 
-	// Check if already running
-	if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
-		conn.Close()
-		resp, err := http.Get(mailpitAPI + "/v1/messages")
-		if err == nil && resp.StatusCode == 200 {
-			resp.Body.Close()
-			mailpitReady = true
-			useMailpit = true
-			return nil
+	// Check if container exists
+	out, err := runDockerCmd("inspect", "--format", "{{.State.Running}}", containerName)
+	if err == nil {
+		// Container exists
+		running := strings.TrimSpace(string(out))
+		if running == "true" {
+			// Already running, verify it's responsive
+			return waitForMailpit(addr)
 		}
-		if resp != nil {
-			resp.Body.Close()
+		// Container exists but not running, start it
+		if _, err := runDockerCmd("start", containerName); err != nil {
+			// Failed to start, remove and recreate
+			_, _ = runDockerCmd("rm", "-f", containerName)
+		} else {
+			return waitForMailpit(addr)
 		}
 	}
 
-	// Start container
-	_, _ = runDockerCmd("rm", "-f", containerName)
-	_, err := runDockerCmd("run", "-d", "--name", containerName,
+	// Container doesn't exist, check if image exists
+	if _, err := runDockerCmd("image", "inspect", imageName); err != nil {
+		// Image doesn't exist, pull it
+		if _, err := runDockerCmd("pull", imageName); err != nil {
+			return fmt.Errorf("failed to pull mailpit image: %w", err)
+		}
+	}
+
+	// Create and start container
+	_, err = runDockerCmd("run", "-d", "--name", containerName,
 		"-p", fmt.Sprintf("%d:1025", smtpPort),
 		"-p", "8025:8025",
 		"-e", "MP_SMTP_AUTH_ACCEPT_ANY=true",
 		"-e", "MP_SMTP_AUTH_ALLOW_INSECURE=true",
-		"axllent/mailpit")
+		imageName)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create mailpit container: %w", err)
 	}
 
-	// Wait for container readiness
-	deadline := time.Now().Add(15 * time.Second)
+	return waitForMailpit(addr)
+}
+
+// waitForMailpit waits until Mailpit API is responsive
+func waitForMailpit(addr string) error {
+	timeout := containerTimeout()
+	deadline := time.Now().Add(timeout)
+	dialTO := dialTimeout()
+
 	for time.Now().Before(deadline) {
-		if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
+		if conn, err := net.DialTimeout("tcp", addr, dialTO); err == nil {
 			conn.Close()
 			resp, err := http.Get(mailpitAPI + "/v1/messages")
 			if err == nil && resp.StatusCode == 200 {
@@ -133,13 +173,13 @@ func initMailpitContainer() error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return fmt.Errorf("mailpit not ready after 15s")
+	return fmt.Errorf("mailpit not ready after %v", timeout)
 }
 
 // MailpitMessage represents a message from Mailpit API
 type MailpitMessage struct {
-	ID          string   `json:"ID"`
-	From        struct {
+	ID   string `json:"ID"`
+	From struct {
 		Name    string `json:"Name"`
 		Address string `json:"Address"`
 	} `json:"From"`
@@ -159,11 +199,11 @@ type MailpitMessage struct {
 		Name    string `json:"Name"`
 		Address string `json:"Address"`
 	} `json:"ReplyTo"`
-	Subject     string            `json:"Subject"`
-	Attachments int               `json:"Attachments"`
-	Size        int               `json:"Size"`
-	Text        string            `json:"Text"`
-	HTML        string            `json:"HTML"`
+	Subject     string              `json:"Subject"`
+	Attachments int                 `json:"Attachments"`
+	Size        int                 `json:"Size"`
+	Text        string              `json:"Text"`
+	HTML        string              `json:"HTML"`
 	Headers     map[string][]string `json:"Headers,omitempty"`
 }
 
@@ -317,10 +357,23 @@ func runDockerCmd(args ...string) ([]byte, error) {
 func setupMailpit(t *testing.T) *liveSMTPServer {
 	t.Helper()
 
-	// TestMain already initialized Mailpit
+	addr := fmt.Sprintf("%s:%d", smtpHost, smtpPort)
+	dialTO := dialTimeout()
+
+	// Check if Mailpit is actually reachable (container may have crashed mid-suite)
 	if mailpitReady {
-		t.Logf("Mailpit container ready on %s:%d", smtpHost, smtpPort)
-		return nil
+		if conn, err := net.DialTimeout("tcp", addr, dialTO); err == nil {
+			conn.Close()
+			t.Logf("Mailpit container ready on %s:%d", smtpHost, smtpPort)
+			return nil
+		}
+		// Container was ready but is now unreachable - try to restart it
+		t.Logf("Mailpit container became unreachable, attempting restart...")
+		_, _ = runDockerCmd("start", containerName)
+		if err := waitForMailpit(addr); err == nil {
+			t.Logf("Mailpit container restarted on %s:%d", smtpHost, smtpPort)
+			return nil
+		}
 	}
 
 	// If Mailpit setup failed in TestMain, use fallback
@@ -330,8 +383,7 @@ func setupMailpit(t *testing.T) *liveSMTPServer {
 	}
 
 	// Fallback check: try to connect directly
-	addr := fmt.Sprintf("%s:%d", smtpHost, smtpPort)
-	if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
+	if conn, err := net.DialTimeout("tcp", addr, dialTO); err == nil {
 		conn.Close()
 		t.Logf("SMTP server available on %s", addr)
 		return nil
@@ -519,10 +571,10 @@ func TestLive_FullFeaturedEmail(t *testing.T) {
 
 		// Headers
 		Headers: map[string]string{
-			"X-Custom-Header":  "CustomValue",
-			"X-Campaign-ID":    "CAMPAIGN-12345",
-			"X-Priority":       "1",
-			"X-Mailer":         "mailxgo-e2e-test",
+			"X-Custom-Header": "CustomValue",
+			"X-Campaign-ID":   "CAMPAIGN-12345",
+			"X-Priority":      "1",
+			"X-Mailer":        "mailxgo-e2e-test",
 		},
 
 		// Delivery options
@@ -1278,8 +1330,8 @@ func TestLive_ConfigFileAllOptions(t *testing.T) {
 func TestLive_ErrorClassification(t *testing.T) {
 	// Test that error types are correctly classified
 	testCases := []struct {
-		name        string
-		errMsg      string
+		name         string
+		errMsg       string
 		expectedType mailxgo.ErrorType
 	}{
 		{"TLS Error", "tls: handshake failure", mailxgo.ErrorTypeTLS},
@@ -1655,7 +1707,7 @@ func TestLive_TLSFingerprintValidation(t *testing.T) {
 
 	invalidFingerprints := []string{
 		"",
-		"0123456789ABCDEF",                               // too short
+		"0123456789ABCDEF", // too short
 		"0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEFGG", // invalid chars
 	}
 
@@ -1994,5 +2046,1563 @@ func TestLive_OAuth2_XOAUTH2Authentication(t *testing.T) {
 			t.Errorf("Expected success status in output, got: %s", string(out))
 		}
 		t.Logf("CLI OAuth2 test passed")
+	})
+}
+
+// =============================================================================
+// E2E TEST: Dry-Run Mode
+// =============================================================================
+func TestLive_DryRun(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	params := mailxgo.EmailParams{
+		SMTPServer: smtpHost,
+		SMTPPort:   smtpPort,
+		From:       "dryrun@example.com",
+		To:         []string{"recipient@example.com"},
+		Subject:    "Dry-Run Test",
+		Body:       "This should NOT be sent",
+		TLSMode:    "none",
+		NoAuth:     true,
+		DryRun:     true,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Dry-run failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+
+	// Verify NO email was sent to Mailpit
+	if useMailpit {
+		time.Sleep(200 * time.Millisecond)
+		msgs := getMailpitMessages(t)
+		if len(msgs) > 0 {
+			t.Errorf("Dry-run should not send email, but found %d messages", len(msgs))
+		}
+	}
+	t.Logf("Dry-run validated without sending")
+}
+
+// =============================================================================
+// E2E TEST: Quiet Mode
+// =============================================================================
+func TestLive_QuietMode(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	// Capture stdout
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	params := mailxgo.EmailParams{
+		SMTPServer: smtpHost,
+		SMTPPort:   smtpPort,
+		From:       "quiet@example.com",
+		To:         []string{"recipient@example.com"},
+		Subject:    "Quiet Mode Test",
+		Body:       "Testing quiet mode",
+		TLSMode:    "none",
+		NoAuth:     true,
+		Quiet:      true,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+
+	w.Close()
+	out, _ := io.ReadAll(r)
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("Quiet mode send failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+
+	// Verify no output was produced
+	if len(out) > 0 {
+		t.Errorf("Quiet mode should suppress output, but got: %s", string(out))
+	}
+	t.Logf("Quiet mode suppressed output correctly")
+}
+
+// =============================================================================
+// E2E TEST: Read Receipt Header
+// =============================================================================
+func TestLive_ReadReceipt(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	params := mailxgo.EmailParams{
+		SMTPServer:  smtpHost,
+		SMTPPort:    smtpPort,
+		From:        "receipt@example.com",
+		To:          []string{"recipient@example.com"},
+		Subject:     "Read Receipt Test",
+		Body:        "Testing read receipt header",
+		TLSMode:     "none",
+		NoAuth:      true,
+		ReadReceipt: true,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Read receipt send failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+
+	// Verify the Disposition-Notification-To header via Mailpit API
+	if useMailpit {
+		msgs := getMailpitMessages(t)
+		if len(msgs) == 0 {
+			t.Error("No messages received by Mailpit")
+		} else {
+			details := getMailpitMessageDetails(t, msgs[0].ID)
+			if details != nil && details.Headers != nil {
+				dnt := details.Headers["Disposition-Notification-To"]
+				if len(dnt) == 0 || !strings.Contains(dnt[0], "receipt@example.com") {
+					t.Errorf("Expected Disposition-Notification-To header with sender, got: %v", dnt)
+				} else {
+					t.Logf("Read receipt header correctly set: %v", dnt)
+				}
+			}
+		}
+	}
+}
+
+// =============================================================================
+// E2E TEST: Template Substitution
+// =============================================================================
+func TestLive_Template(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	tmpDir := t.TempDir()
+
+	// Create template file
+	tmplFile := filepath.Join(tmpDir, "email.tmpl")
+	tmplContent := "Dear {{.Name}},\n\nYour order {{.OrderID}} has been shipped.\n\nBest regards,\nThe Team"
+	if err := os.WriteFile(tmplFile, []byte(tmplContent), 0o644); err != nil {
+		t.Fatalf("Failed to create template: %v", err)
+	}
+
+	// Create JSON data file
+	dataFile := filepath.Join(tmpDir, "vars.json")
+	jsonContent := `{"Name": "Alice", "OrderID": "ORD-12345"}`
+	if err := os.WriteFile(dataFile, []byte(jsonContent), 0o644); err != nil {
+		t.Fatalf("Failed to create data file: %v", err)
+	}
+
+	params := mailxgo.EmailParams{
+		SMTPServer:       smtpHost,
+		SMTPPort:         smtpPort,
+		From:             "template@example.com",
+		To:               []string{"recipient@example.com"},
+		Subject:          "Template Test",
+		TemplateFile:     tmplFile,
+		TemplateDataFile: dataFile,
+		TLSMode:          "none",
+		NoAuth:           true,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Template send failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+
+	// Verify template was processed
+	if useMailpit {
+		msgs := getMailpitMessages(t)
+		if len(msgs) == 0 {
+			t.Error("No messages received by Mailpit")
+		} else {
+			details := getMailpitMessageDetails(t, msgs[0].ID)
+			if details != nil {
+				if !strings.Contains(details.Text, "Alice") {
+					t.Errorf("Expected 'Alice' in body, got: %s", details.Text)
+				}
+				if !strings.Contains(details.Text, "ORD-12345") {
+					t.Errorf("Expected 'ORD-12345' in body, got: %s", details.Text)
+				}
+				t.Logf("Template correctly processed: Name=Alice, OrderID=ORD-12345")
+			}
+		}
+	}
+}
+
+// =============================================================================
+// E2E TEST: Template with inline --var flags
+// =============================================================================
+func TestLive_TemplateInlineVars(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	params := mailxgo.EmailParams{
+		SMTPServer: smtpHost,
+		SMTPPort:   smtpPort,
+		From:       "template-inline@example.com",
+		To:         []string{"recipient@example.com"},
+		Subject:    "Inline Template Test",
+		Body:       "Hello {{.User}}, your code is {{.Code}}.",
+		TemplateVars: map[string]string{
+			"User": "Bob",
+			"Code": "XYZ789",
+		},
+		TLSMode: "none",
+		NoAuth:  true,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Inline template send failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+
+	if useMailpit {
+		msgs := getMailpitMessages(t)
+		if len(msgs) > 0 {
+			details := getMailpitMessageDetails(t, msgs[0].ID)
+			if details != nil {
+				if !strings.Contains(details.Text, "Bob") || !strings.Contains(details.Text, "XYZ789") {
+					t.Errorf("Template vars not applied: %s", details.Text)
+				} else {
+					t.Logf("Inline template vars correctly applied")
+				}
+			}
+		}
+	}
+}
+
+// =============================================================================
+// E2E TEST: Delay before sending
+// =============================================================================
+func TestLive_Delay(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	params := mailxgo.EmailParams{
+		SMTPServer: smtpHost,
+		SMTPPort:   smtpPort,
+		From:       "delay@example.com",
+		To:         []string{"recipient@example.com"},
+		Subject:    "Delay Test",
+		Body:       "Testing delay feature",
+		TLSMode:    "none",
+		NoAuth:     true,
+		Delay:      2, // 2 second delay
+		Quiet:      true,
+	}
+
+	start := time.Now()
+	res, err := mailxgo.SendEmail(params)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Delay send failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+
+	// Verify delay was applied (should take at least 1.5 seconds)
+	if elapsed < 1500*time.Millisecond {
+		t.Errorf("Expected delay of ~2s, but only took %v", elapsed)
+	}
+	t.Logf("Delay correctly applied: took %v", elapsed)
+}
+
+// =============================================================================
+// E2E TEST: Save EML archive
+// =============================================================================
+func TestLive_SaveEML(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	tmpDir := t.TempDir()
+	emlDir := filepath.Join(tmpDir, "archive")
+
+	params := mailxgo.EmailParams{
+		SMTPServer:  smtpHost,
+		SMTPPort:    smtpPort,
+		From:        "archive@example.com",
+		To:          []string{"recipient@example.com"},
+		Subject:     "EML Archive Test",
+		Body:        "Testing EML archiving",
+		TLSMode:     "none",
+		NoAuth:      true,
+		SaveEMLPath: emlDir,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("EML archive send failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+
+	// Verify EML file was created
+	files, err := os.ReadDir(emlDir)
+	if err != nil {
+		t.Fatalf("Failed to read EML dir: %v", err)
+	}
+	if len(files) != 1 {
+		t.Errorf("Expected 1 EML file, got %d", len(files))
+	}
+	if len(files) > 0 {
+		name := files[0].Name()
+		if !strings.HasPrefix(name, "mailarchive_") {
+			t.Errorf("Expected mailarchive_ prefix, got %s", name)
+		}
+		if !strings.HasSuffix(name, ".eml") {
+			t.Errorf("Expected .eml extension, got %s", name)
+		}
+		// Verify file has content
+		emlPath := filepath.Join(emlDir, name)
+		data, err := os.ReadFile(emlPath)
+		if err != nil {
+			t.Errorf("Failed to read EML file: %v", err)
+		}
+		if len(data) < 100 {
+			t.Errorf("EML file too small: %d bytes", len(data))
+		}
+		t.Logf("EML archived: %s (%d bytes)", name, len(data))
+	}
+}
+
+// =============================================================================
+// E2E TEST: Save EML archive with compression
+// =============================================================================
+func TestLive_SaveEMLCompressed(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	tmpDir := t.TempDir()
+	emlDir := filepath.Join(tmpDir, "archive-zstd")
+
+	params := mailxgo.EmailParams{
+		SMTPServer:  smtpHost,
+		SMTPPort:    smtpPort,
+		From:        "archive-zstd@example.com",
+		To:          []string{"recipient@example.com"},
+		Subject:     "Compressed EML Test",
+		Body:        "Testing compressed EML archiving",
+		TLSMode:     "none",
+		NoAuth:      true,
+		SaveEMLPath: emlDir,
+		CompressEML: true,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Compressed EML send failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+
+	files, err := os.ReadDir(emlDir)
+	if err != nil {
+		t.Fatalf("Failed to read EML dir: %v", err)
+	}
+	if len(files) != 1 {
+		t.Errorf("Expected 1 compressed EML file, got %d", len(files))
+	}
+	if len(files) > 0 {
+		name := files[0].Name()
+		if !strings.HasPrefix(name, "mailarchive_") {
+			t.Errorf("Expected mailarchive_ prefix, got %s", name)
+		}
+		if !strings.HasSuffix(name, ".eml.zst") {
+			t.Errorf("Expected .eml.zst extension, got %s", name)
+		}
+		t.Logf("Compressed EML archived: %s", name)
+	}
+}
+
+// =============================================================================
+// E2E TEST: File routing on success (--route)
+// =============================================================================
+func TestLive_RouteSuccess(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	tmpDir := t.TempDir()
+	successDir := filepath.Join(tmpDir, "sent")
+	errorDir := filepath.Join(tmpDir, "failed")
+
+	// Create test attachment
+	attFile := filepath.Join(tmpDir, "report.pdf")
+	if err := os.WriteFile(attFile, []byte("PDF content here"), 0o644); err != nil {
+		t.Fatalf("Failed to create attachment: %v", err)
+	}
+
+	params := mailxgo.EmailParams{
+		SMTPServer:       smtpHost,
+		SMTPPort:         smtpPort,
+		From:             "routing@example.com",
+		To:               []string{"recipient@example.com"},
+		Subject:          "Attachment Routing Test",
+		Body:             "Testing attachment routing",
+		Attachments:      []string{attFile},
+		TLSMode:          "none",
+		NoAuth:           true,
+		RouteSuccessPath: successDir,
+		RouteErrorPath:   errorDir,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Attachment routing send failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+
+	// Verify attachment was moved to success path
+	if _, err := os.Stat(attFile); !os.IsNotExist(err) {
+		t.Errorf("Original attachment should be removed")
+	}
+	movedFile := filepath.Join(successDir, "report.pdf")
+	if _, err := os.Stat(movedFile); err != nil {
+		t.Errorf("Attachment should exist in success dir: %v", err)
+	} else {
+		t.Logf("Attachment correctly routed to success path")
+	}
+}
+
+// =============================================================================
+// E2E TEST: File delete after success (--delete)
+// =============================================================================
+func TestLive_RouteDelete(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	tmpDir := t.TempDir()
+
+	// Create test attachment
+	attFile := filepath.Join(tmpDir, "temp-report.pdf")
+	if err := os.WriteFile(attFile, []byte("Temporary PDF content"), 0o644); err != nil {
+		t.Fatalf("Failed to create attachment: %v", err)
+	}
+
+	params := mailxgo.EmailParams{
+		SMTPServer:  smtpHost,
+		SMTPPort:    smtpPort,
+		From:        "delete@example.com",
+		To:          []string{"recipient@example.com"},
+		Subject:     "Attachment Delete Test",
+		Body:        "Testing attachment delete",
+		Attachments: []string{attFile},
+		TLSMode:     "none",
+		NoAuth:      true,
+		RouteDelete: true,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Attachment delete send failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+
+	// Verify attachment was deleted
+	if _, err := os.Stat(attFile); !os.IsNotExist(err) {
+		t.Errorf("Attachment should be deleted after successful send")
+	} else {
+		t.Logf("Attachment correctly deleted after send")
+	}
+}
+
+// =============================================================================
+// E2E TEST: Body file routing
+// =============================================================================
+func TestLive_BodyFileRouting(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	tmpDir := t.TempDir()
+	successDir := filepath.Join(tmpDir, "sent-bodies")
+
+	// Create body file
+	bodyFile := filepath.Join(tmpDir, "email-body.html")
+	if err := os.WriteFile(bodyFile, []byte("<h1>Test Email</h1><p>Body content</p>"), 0o644); err != nil {
+		t.Fatalf("Failed to create body file: %v", err)
+	}
+
+	params := mailxgo.EmailParams{
+		SMTPServer:       smtpHost,
+		SMTPPort:         smtpPort,
+		From:             "bodyroute@example.com",
+		To:               []string{"recipient@example.com"},
+		Subject:          "Body File Routing Test",
+		BodyFile:         bodyFile,
+		TLSMode:          "none",
+		NoAuth:           true,
+		RouteSuccessPath: successDir,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Body file routing send failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+
+	// Verify body file was moved to success path
+	if _, err := os.Stat(bodyFile); !os.IsNotExist(err) {
+		t.Errorf("Original body file should be removed")
+	}
+	movedFile := filepath.Join(successDir, "email-body.html")
+	if _, err := os.Stat(movedFile); err != nil {
+		t.Errorf("Body file should exist in success dir: %v", err)
+	} else {
+		t.Logf("Body file correctly routed to success path")
+	}
+}
+
+// =============================================================================
+// E2E TEST: Rate limit (--rate-limit)
+// =============================================================================
+func TestLive_RateLimit(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	// Rate limit is for batch sends - test that it's accepted and works
+	params := mailxgo.EmailParams{
+		SMTPServer: smtpHost,
+		SMTPPort:   smtpPort,
+		From:       "ratelimit@example.com",
+		To:         []string{"recipient@example.com"},
+		Subject:    "Rate Limit Test",
+		Body:       "Testing rate limit parameter",
+		TLSMode:    "none",
+		NoAuth:     true,
+		RateLimit:  30, // 30 emails per minute
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Rate limit send failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+	t.Logf("Rate limit parameter accepted")
+}
+
+// =============================================================================
+// E2E TEST: Route with body file only (no attachments)
+// =============================================================================
+func TestLive_RouteBodyFileOnly(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	tmpDir := t.TempDir()
+	successDir := filepath.Join(tmpDir, "sent")
+
+	// Create body file only, no attachments
+	bodyFile := filepath.Join(tmpDir, "body-only.html")
+	if err := os.WriteFile(bodyFile, []byte("<p>Body only test</p>"), 0o644); err != nil {
+		t.Fatalf("Failed to create body file: %v", err)
+	}
+
+	params := mailxgo.EmailParams{
+		SMTPServer:       smtpHost,
+		SMTPPort:         smtpPort,
+		From:             "bodyonly@example.com",
+		To:               []string{"recipient@example.com"},
+		Subject:          "Body File Only Routing Test",
+		BodyFile:         bodyFile,
+		TLSMode:          "none",
+		NoAuth:           true,
+		RouteSuccessPath: successDir,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Body file only routing failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+
+	// Verify body file was moved
+	if _, err := os.Stat(bodyFile); !os.IsNotExist(err) {
+		t.Errorf("Original body file should be removed")
+	}
+	movedFile := filepath.Join(successDir, "body-only.html")
+	if _, err := os.Stat(movedFile); err != nil {
+		t.Errorf("Body file should exist in success dir: %v", err)
+	} else {
+		t.Logf("Body file only correctly routed")
+	}
+}
+
+// =============================================================================
+// E2E TEST: Route with multiple attachments
+// =============================================================================
+func TestLive_RouteMultipleAttachments(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	tmpDir := t.TempDir()
+	successDir := filepath.Join(tmpDir, "sent-multi")
+
+	// Create multiple attachments
+	att1 := filepath.Join(tmpDir, "doc1.pdf")
+	att2 := filepath.Join(tmpDir, "doc2.xlsx")
+	att3 := filepath.Join(tmpDir, "image.png")
+	if err := os.WriteFile(att1, []byte("PDF content"), 0o644); err != nil {
+		t.Fatalf("Failed to create attachment 1: %v", err)
+	}
+	if err := os.WriteFile(att2, []byte("Excel content"), 0o644); err != nil {
+		t.Fatalf("Failed to create attachment 2: %v", err)
+	}
+	if err := os.WriteFile(att3, []byte("Image content"), 0o644); err != nil {
+		t.Fatalf("Failed to create attachment 3: %v", err)
+	}
+
+	params := mailxgo.EmailParams{
+		SMTPServer:       smtpHost,
+		SMTPPort:         smtpPort,
+		From:             "multiatt@example.com",
+		To:               []string{"recipient@example.com"},
+		Subject:          "Multiple Attachments Routing Test",
+		Body:             "Email with multiple attachments",
+		Attachments:      []string{att1, att2, att3},
+		TLSMode:          "none",
+		NoAuth:           true,
+		RouteSuccessPath: successDir,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Multiple attachments routing failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+
+	// Verify all attachments were moved
+	for _, name := range []string{"doc1.pdf", "doc2.xlsx", "image.png"} {
+		movedFile := filepath.Join(successDir, name)
+		if _, err := os.Stat(movedFile); err != nil {
+			t.Errorf("Attachment %s should exist in success dir: %v", name, err)
+		}
+	}
+	t.Logf("All %d attachments correctly routed", 3)
+}
+
+// =============================================================================
+// E2E TEST: Route with body file AND attachments
+// =============================================================================
+func TestLive_RouteBodyAndAttachments(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	tmpDir := t.TempDir()
+	successDir := filepath.Join(tmpDir, "sent-both")
+
+	// Create body file and attachments
+	bodyFile := filepath.Join(tmpDir, "newsletter.html")
+	att1 := filepath.Join(tmpDir, "report.pdf")
+	if err := os.WriteFile(bodyFile, []byte("<h1>Newsletter</h1>"), 0o644); err != nil {
+		t.Fatalf("Failed to create body file: %v", err)
+	}
+	if err := os.WriteFile(att1, []byte("Report content"), 0o644); err != nil {
+		t.Fatalf("Failed to create attachment: %v", err)
+	}
+
+	params := mailxgo.EmailParams{
+		SMTPServer:       smtpHost,
+		SMTPPort:         smtpPort,
+		From:             "both@example.com",
+		To:               []string{"recipient@example.com"},
+		Subject:          "Body And Attachment Routing Test",
+		BodyFile:         bodyFile,
+		Attachments:      []string{att1},
+		TLSMode:          "none",
+		NoAuth:           true,
+		RouteSuccessPath: successDir,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Body and attachment routing failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+
+	// Verify both body file and attachment were moved
+	bodyMoved := filepath.Join(successDir, "newsletter.html")
+	attMoved := filepath.Join(successDir, "report.pdf")
+	if _, err := os.Stat(bodyMoved); err != nil {
+		t.Errorf("Body file should exist in success dir: %v", err)
+	}
+	if _, err := os.Stat(attMoved); err != nil {
+		t.Errorf("Attachment should exist in success dir: %v", err)
+	}
+	t.Logf("Both body file and attachment correctly routed")
+}
+
+// =============================================================================
+// E2E TEST: No routing (plain email, no body file, no attachments)
+// =============================================================================
+func TestLive_NoRouting(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	params := mailxgo.EmailParams{
+		SMTPServer:       smtpHost,
+		SMTPPort:         smtpPort,
+		From:             "noroute@example.com",
+		To:               []string{"recipient@example.com"},
+		Subject:          "No Routing Test",
+		Body:             "Plain email with inline body, no routing",
+		TLSMode:          "none",
+		NoAuth:           true,
+		RouteSuccessPath: "/some/path", // Set but no files to route
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("No routing send failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected status success, got %s", res.Status)
+	}
+	t.Logf("Plain email with no files to route succeeded")
+}
+
+// =============================================================================
+// E2E TEST: Path validation errors
+// =============================================================================
+func TestLive_PathValidation(t *testing.T) {
+	setupMailpit(t)
+
+	t.Run("relative body file rejected", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   smtpPort,
+			From:       "test@example.com",
+			To:         []string{"recipient@example.com"},
+			BodyFile:   "relative/body.html",
+			TLSMode:    "none",
+			NoAuth:     true,
+		}
+		_, err := mailxgo.SendEmail(params)
+		if err == nil {
+			t.Error("expected error for relative body file")
+		} else {
+			t.Logf("Correctly rejected relative path: %v", err)
+		}
+	})
+
+	t.Run("nonexistent attachment rejected", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer:  smtpHost,
+			SMTPPort:    smtpPort,
+			From:        "test@example.com",
+			To:          []string{"recipient@example.com"},
+			Body:        "test",
+			Attachments: []string{"/nonexistent/file.pdf"},
+			TLSMode:     "none",
+			NoAuth:      true,
+		}
+		_, err := mailxgo.SendEmail(params)
+		if err == nil {
+			t.Error("expected error for nonexistent attachment")
+		} else {
+			t.Logf("Correctly rejected nonexistent file: %v", err)
+		}
+	})
+}
+
+// =============================================================================
+// E2E TEST: Single attachment mode (--single-attachment)
+// =============================================================================
+func TestLive_SingleAttachment(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	tmpDir := t.TempDir()
+
+	// Create test attachments
+	att1 := filepath.Join(tmpDir, "report.pdf")
+	att2 := filepath.Join(tmpDir, "data.xlsx")
+	att3 := filepath.Join(tmpDir, "summary.docx")
+	_ = os.WriteFile(att1, []byte("PDF content for report"), 0o644)
+	_ = os.WriteFile(att2, []byte("Excel content for data"), 0o644)
+	_ = os.WriteFile(att3, []byte("Word content for summary"), 0o644)
+
+	params := mailxgo.EmailParams{
+		SMTPServer:       smtpHost,
+		SMTPPort:         smtpPort,
+		From:             "single@example.com",
+		To:               []string{"recipient@example.com"},
+		Subject:          "Monthly Report",
+		Body:             "Please find the attachment.",
+		Attachments:      []string{att1, att2, att3},
+		SingleAttachment: true,
+		TLSMode:          "none",
+		NoAuth:           true,
+		Quiet:            true,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Single attachment send failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected success, got %s", res.Status)
+	}
+
+	// Verify 3 separate emails were received
+	time.Sleep(500 * time.Millisecond) // Allow Mailpit to process
+	messages := getMailpitMessages(t)
+
+	if len(messages) != 3 {
+		t.Errorf("Expected 3 emails (one per attachment), got %d", len(messages))
+	}
+
+	// Verify subject prefixes
+	foundPrefixes := make(map[string]bool)
+	for _, msg := range messages {
+		if strings.Contains(msg.Subject, "[1/3]") {
+			foundPrefixes["1/3"] = true
+		}
+		if strings.Contains(msg.Subject, "[2/3]") {
+			foundPrefixes["2/3"] = true
+		}
+		if strings.Contains(msg.Subject, "[3/3]") {
+			foundPrefixes["3/3"] = true
+		}
+	}
+
+	if len(foundPrefixes) != 3 {
+		t.Errorf("Expected all 3 prefixes [1/3], [2/3], [3/3], found: %v", foundPrefixes)
+	}
+
+	t.Logf("Single attachment mode: sent %d separate emails with correct prefixes", len(messages))
+}
+
+// =============================================================================
+// E2E TEST: Single attachment mode with routing
+// =============================================================================
+func TestLive_SingleAttachmentWithRouting(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	tmpDir := t.TempDir()
+	successDir := filepath.Join(tmpDir, "sent")
+
+	// Create test attachments
+	att1 := filepath.Join(tmpDir, "file1.txt")
+	att2 := filepath.Join(tmpDir, "file2.txt")
+	_ = os.WriteFile(att1, []byte("content 1"), 0o644)
+	_ = os.WriteFile(att2, []byte("content 2"), 0o644)
+
+	params := mailxgo.EmailParams{
+		SMTPServer:       smtpHost,
+		SMTPPort:         smtpPort,
+		From:             "route@example.com",
+		To:               []string{"recipient@example.com"},
+		Subject:          "Route Test",
+		Body:             "Testing single attachment with routing",
+		Attachments:      []string{att1, att2},
+		SingleAttachment: true,
+		RouteSuccessPath: successDir,
+		TLSMode:          "none",
+		NoAuth:           true,
+		Quiet:            true,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Single attachment with routing failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected success, got %s", res.Status)
+	}
+
+	// Verify files were routed to success
+	if _, err := os.Stat(filepath.Join(successDir, "file1.txt")); err != nil {
+		t.Errorf("file1.txt should be in success dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(successDir, "file2.txt")); err != nil {
+		t.Errorf("file2.txt should be in success dir: %v", err)
+	}
+
+	// Original files should be gone
+	if _, err := os.Stat(att1); !os.IsNotExist(err) {
+		t.Error("original file1.txt should be moved")
+	}
+	if _, err := os.Stat(att2); !os.IsNotExist(err) {
+		t.Error("original file2.txt should be moved")
+	}
+
+	t.Logf("Single attachment mode with routing: files correctly moved to success path")
+}
+
+// =============================================================================
+// E2E TEST: Single attachment mode - single file (no split)
+// =============================================================================
+func TestLive_SingleAttachmentOneFile(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	tmpDir := t.TempDir()
+	att := filepath.Join(tmpDir, "single.txt")
+	_ = os.WriteFile(att, []byte("single file content"), 0o644)
+
+	params := mailxgo.EmailParams{
+		SMTPServer:       smtpHost,
+		SMTPPort:         smtpPort,
+		From:             "one@example.com",
+		To:               []string{"recipient@example.com"},
+		Subject:          "Single File Test",
+		Body:             "Only one attachment",
+		Attachments:      []string{att},
+		SingleAttachment: true,
+		TLSMode:          "none",
+		NoAuth:           true,
+		Quiet:            true,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("Single file send failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Errorf("expected success, got %s", res.Status)
+	}
+
+	// With only 1 attachment, should send 1 email (no split needed)
+	time.Sleep(300 * time.Millisecond)
+	messages := getMailpitMessages(t)
+
+	if len(messages) != 1 {
+		t.Errorf("Expected 1 email for single file, got %d", len(messages))
+	}
+
+	t.Logf("Single attachment mode with one file: correctly sent without splitting")
+}
+
+// TestLive_MaxRecipients tests the --max-recipients limit guard.
+func TestLive_MaxRecipients(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	t.Run("rejects_when_exceeding_limit", func(t *testing.T) {
+		// Create 10 recipients but limit to 5
+		recipients := make([]string, 10)
+		for i := 0; i < 10; i++ {
+			recipients[i] = fmt.Sprintf("recipient%d@example.com", i)
+		}
+
+		params := mailxgo.EmailParams{
+			SMTPServer:    smtpHost,
+			SMTPPort:      smtpPort,
+			From:          "sender@example.com",
+			To:            recipients,
+			Subject:       "Max Recipients Test - Should Fail",
+			Body:          "This should fail due to recipient limit",
+			MaxRecipients: 5,
+			TLSMode:       "none",
+			NoAuth:        true,
+			Quiet:         true,
+		}
+
+		_, err := mailxgo.SendEmail(params)
+		if err == nil {
+			t.Error("expected error when exceeding max recipients")
+		}
+		if err != nil && !strings.Contains(err.Error(), "exceeds maximum") {
+			t.Errorf("expected 'exceeds maximum' error, got: %v", err)
+		}
+
+		t.Logf("MaxRecipients: correctly rejected %d recipients (limit: 5)", len(recipients))
+	})
+
+	t.Run("accepts_when_within_limit", func(t *testing.T) {
+		clearMailpit(t)
+
+		recipients := []string{"a@example.com", "b@example.com", "c@example.com"}
+
+		params := mailxgo.EmailParams{
+			SMTPServer:    smtpHost,
+			SMTPPort:      smtpPort,
+			From:          "sender@example.com",
+			To:            recipients,
+			Subject:       "Max Recipients Test - Should Pass",
+			Body:          "This should succeed",
+			MaxRecipients: 5,
+			TLSMode:       "none",
+			NoAuth:        true,
+			Quiet:         true,
+		}
+
+		res, err := mailxgo.SendEmail(params)
+		if err != nil {
+			t.Fatalf("SendEmail failed: %v", err)
+		}
+		if res.Status != "success" {
+			t.Errorf("expected success, got %s", res.Status)
+		}
+
+		time.Sleep(300 * time.Millisecond)
+		messages := getMailpitMessages(t)
+		if len(messages) != 1 {
+			t.Errorf("expected 1 message, got %d", len(messages))
+		}
+
+		t.Logf("MaxRecipients: correctly accepted %d recipients (limit: 5)", len(recipients))
+	})
+}
+
+// TestLive_SingleRecipient tests --single-recipient batch mode via Mailpit.
+func TestLive_SingleRecipient(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	t.Run("sends_one_email_per_recipient", func(t *testing.T) {
+		recipients := []string{
+			"recipient1@example.com",
+			"recipient2@example.com",
+			"recipient3@example.com",
+		}
+
+		params := mailxgo.EmailParams{
+			SMTPServer:      smtpHost,
+			SMTPPort:        smtpPort,
+			From:            "sender@example.com",
+			To:              recipients,
+			Subject:         "Single Recipient Mode Test",
+			Body:            "This should be sent to each recipient separately.",
+			SingleRecipient: true,
+			TLSMode:         "none",
+			NoAuth:          true,
+			Quiet:           true,
+		}
+
+		res, err := mailxgo.SendEmail(params)
+		if err != nil {
+			t.Fatalf("SendEmail failed: %v", err)
+		}
+		if res.Status != "success" {
+			t.Errorf("expected success, got %s", res.Status)
+		}
+
+		// Wait for all messages to arrive
+		time.Sleep(500 * time.Millisecond)
+		messages := getMailpitMessages(t)
+
+		// Should have 3 separate emails (one per recipient)
+		if len(messages) != 3 {
+			t.Errorf("expected 3 separate emails, got %d", len(messages))
+		}
+
+		t.Logf("SingleRecipient: sent %d emails for %d recipients", len(messages), len(recipients))
+	})
+
+	t.Run("single_recipient_skips_batch_mode", func(t *testing.T) {
+		clearMailpit(t)
+
+		params := mailxgo.EmailParams{
+			SMTPServer:      smtpHost,
+			SMTPPort:        smtpPort,
+			From:            "sender@example.com",
+			To:              []string{"single@example.com"},
+			Subject:         "Single Recipient - No Split",
+			Body:            "Only one recipient, no split needed.",
+			SingleRecipient: true,
+			TLSMode:         "none",
+			NoAuth:          true,
+			Quiet:           true,
+		}
+
+		res, err := mailxgo.SendEmail(params)
+		if err != nil {
+			t.Fatalf("SendEmail failed: %v", err)
+		}
+		if res.Status != "success" {
+			t.Errorf("expected success, got %s", res.Status)
+		}
+
+		time.Sleep(300 * time.Millisecond)
+		messages := getMailpitMessages(t)
+
+		// With only 1 recipient, should send normally
+		if len(messages) != 1 {
+			t.Errorf("expected 1 email (no split needed), got %d", len(messages))
+		}
+
+		t.Logf("SingleRecipient: correctly skipped batch mode for single recipient")
+	})
+
+	t.Run("rate_limited_single_recipient", func(t *testing.T) {
+		clearMailpit(t)
+
+		recipients := []string{
+			"rate1@example.com",
+			"rate2@example.com",
+		}
+
+		params := mailxgo.EmailParams{
+			SMTPServer:      smtpHost,
+			SMTPPort:        smtpPort,
+			From:            "sender@example.com",
+			To:              recipients,
+			Subject:         "Rate Limited Single Recipient",
+			Body:            "Testing rate limiting with single recipient mode.",
+			SingleRecipient: true,
+			RateLimit:       60, // 60/min = 1/sec = 1000ms between emails
+			TLSMode:         "none",
+			NoAuth:          true,
+			Quiet:           true,
+		}
+
+		start := time.Now()
+		res, err := mailxgo.SendEmail(params)
+		elapsed := time.Since(start)
+
+		if err != nil {
+			t.Fatalf("SendEmail failed: %v", err)
+		}
+		if res.Status != "success" {
+			t.Errorf("expected success, got %s", res.Status)
+		}
+
+		// With rate limit of 60/min (1/sec) and 2 recipients, expect ~1s delay
+		if elapsed < 800*time.Millisecond {
+			t.Errorf("rate limiting should have added delay, elapsed: %v", elapsed)
+		}
+
+		time.Sleep(300 * time.Millisecond)
+		messages := getMailpitMessages(t)
+
+		if len(messages) != 2 {
+			t.Errorf("expected 2 emails, got %d", len(messages))
+		}
+
+		t.Logf("SingleRecipient with rate limit: sent %d emails in %v", len(messages), elapsed)
+	})
+}
+
+// =============================================================================
+// E2E TEST: RunDiagnostics - Live SMTP Server Probe
+// =============================================================================
+func TestLive_RunDiagnostics(t *testing.T) {
+	setupMailpit(t)
+
+	t.Run("basic diagnostics", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   smtpPort,
+			From:       "diag@example.com",
+			TLSMode:    "none",
+			Timeout:    10,
+		}
+
+		report, err := mailxgo.RunDiagnostics(params, false)
+		if err != nil {
+			t.Fatalf("RunDiagnostics failed: %v", err)
+		}
+
+		if report.Status != "success" {
+			t.Errorf("expected status success, got %s (error: %s)", report.Status, report.Error)
+		}
+		if report.SMTPServer != smtpHost {
+			t.Errorf("expected SMTPServer %s, got %s", smtpHost, report.SMTPServer)
+		}
+		if report.SMTPPort != smtpPort {
+			t.Errorf("expected SMTPPort %d, got %d", smtpPort, report.SMTPPort)
+		}
+
+		// Latency metrics should be populated
+		if report.Latency.TCPConnectMS <= 0 {
+			t.Error("TCPConnectMS should be > 0")
+		}
+		if report.Latency.EHLORTTMS <= 0 {
+			t.Error("EHLORTTMS should be > 0")
+		}
+		if report.Latency.TotalMS <= 0 {
+			t.Error("TotalMS should be > 0")
+		}
+
+		t.Logf("Diagnostics: TCP=%.2fms, EHLO=%.2fms, Total=%.2fms",
+			report.Latency.TCPConnectMS, report.Latency.EHLORTTMS, report.Latency.TotalMS)
+	})
+
+	t.Run("diagnostics with capabilities", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   smtpPort,
+			TLSMode:    "none",
+			Timeout:    10,
+		}
+
+		report, err := mailxgo.RunDiagnostics(params, false)
+		if err != nil {
+			t.Fatalf("RunDiagnostics failed: %v", err)
+		}
+
+		// Mailpit should advertise 8BITMIME
+		if !report.Capabilities.EightBitMIME {
+			t.Log("Note: EightBitMIME not advertised by server")
+		}
+
+		t.Logf("Capabilities: STARTTLS=%v, 8BITMIME=%v, Pipelining=%v, Auth=%v",
+			report.Capabilities.StartTLS,
+			report.Capabilities.EightBitMIME,
+			report.Capabilities.Pipelining,
+			report.Capabilities.AuthMethods)
+	})
+
+	t.Run("diagnostics with DNS info", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   smtpPort,
+			From:       "dns-test@example.com",
+			TLSMode:    "none",
+			Timeout:    10,
+		}
+
+		report, err := mailxgo.RunDiagnostics(params, false)
+		if err != nil {
+			t.Fatalf("RunDiagnostics failed: %v", err)
+		}
+
+		// DNS info should be populated
+		if report.DNSInfo.TargetHost != smtpHost {
+			t.Errorf("expected TargetHost %s, got %s", smtpHost, report.DNSInfo.TargetHost)
+		}
+
+		t.Logf("DNS Info: Target=%s, IPs=%v, MX=%v",
+			report.DNSInfo.TargetHost,
+			report.DNSInfo.ResolvedIPs,
+			report.DNSInfo.MXRecords)
+	})
+
+	t.Run("diagnostics JSON output", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   smtpPort,
+			TLSMode:    "none",
+			JSONOutput: true,
+			Timeout:    10,
+		}
+
+		report, err := mailxgo.RunDiagnostics(params, false)
+		if err != nil {
+			t.Fatalf("RunDiagnostics failed: %v", err)
+		}
+
+		if report.Status != "success" {
+			t.Errorf("expected success, got %s", report.Status)
+		}
+	})
+
+	t.Run("diagnostics NDJSON output", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer:   smtpHost,
+			SMTPPort:     smtpPort,
+			TLSMode:      "none",
+			NDJSONOutput: true,
+			Timeout:      10,
+		}
+
+		report, err := mailxgo.RunDiagnostics(params, false)
+		if err != nil {
+			t.Fatalf("RunDiagnostics failed: %v", err)
+		}
+
+		if report.Status != "success" {
+			t.Errorf("expected success, got %s", report.Status)
+		}
+	})
+
+	t.Run("diagnostics connection failure", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   19999, // Non-existent port
+			TLSMode:    "none",
+			Timeout:    2,
+		}
+
+		report, err := mailxgo.RunDiagnostics(params, false)
+		// Should return a report even on error
+		if report == nil {
+			t.Fatal("expected report even on connection failure")
+		}
+		if report.Status != "error" {
+			t.Errorf("expected status error, got %s", report.Status)
+		}
+		if report.Error == "" {
+			t.Error("expected error message to be populated")
+		}
+		if err == nil {
+			t.Error("expected error return")
+		}
+
+		t.Logf("Connection failure error: %s", report.Error)
+	})
+}
+
+// =============================================================================
+// E2E TEST: OutputDiagReport - All Output Modes
+// =============================================================================
+func TestLive_OutputDiagReport(t *testing.T) {
+	setupMailpit(t)
+
+	params := mailxgo.EmailParams{
+		SMTPServer: smtpHost,
+		SMTPPort:   smtpPort,
+		TLSMode:    "none",
+		Timeout:    10,
+	}
+
+	report, err := mailxgo.RunDiagnostics(params, false)
+	if err != nil {
+		t.Fatalf("RunDiagnostics failed: %v", err)
+	}
+
+	t.Run("text output", func(t *testing.T) {
+		err := mailxgo.OutputDiagReport(*report, false, false, false)
+		if err != nil {
+			t.Errorf("OutputDiagReport text failed: %v", err)
+		}
+	})
+
+	t.Run("JSON output", func(t *testing.T) {
+		err := mailxgo.OutputDiagReport(*report, true, false, false)
+		if err != nil {
+			t.Errorf("OutputDiagReport JSON failed: %v", err)
+		}
+	})
+
+	t.Run("NDJSON output", func(t *testing.T) {
+		err := mailxgo.OutputDiagReport(*report, false, true, false)
+		if err != nil {
+			t.Errorf("OutputDiagReport NDJSON failed: %v", err)
+		}
+	})
+
+	t.Run("text with certs", func(t *testing.T) {
+		err := mailxgo.OutputDiagReport(*report, false, false, true)
+		if err != nil {
+			t.Errorf("OutputDiagReport text+certs failed: %v", err)
+		}
+	})
+}
+
+// =============================================================================
+// E2E TEST: JSON List Format - Recipients and Attachments
+// =============================================================================
+func TestLive_JSONListFormat(t *testing.T) {
+	setupMailpit(t)
+	clearMailpit(t)
+
+	tmpDir := t.TempDir()
+
+	t.Run("JSON recipient list simple array", func(t *testing.T) {
+		clearMailpit(t)
+
+		// Create JSON recipient list
+		listFile := filepath.Join(tmpDir, "recipients.json")
+		content := `["recipient1@example.com", "recipient2@example.com"]`
+		if err := os.WriteFile(listFile, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write recipient list: %v", err)
+		}
+
+		// Load and send
+		recipients, _, err := mailxgo.LoadList(listFile, "json", true)
+		if err != nil {
+			t.Fatalf("LoadList failed: %v", err)
+		}
+		if len(recipients) != 2 {
+			t.Fatalf("expected 2 recipients, got %d", len(recipients))
+		}
+
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   smtpPort,
+			From:       "json-test@example.com",
+			To:         recipients,
+			Subject:    "JSON List Format Test",
+			Body:       "Testing JSON recipient list",
+			TLSMode:    "none",
+			NoAuth:     true,
+		}
+
+		res, err := mailxgo.SendEmail(params)
+		if err != nil {
+			t.Fatalf("SendEmail failed: %v", err)
+		}
+		if res.Status != "success" {
+			t.Errorf("expected success, got %s", res.Status)
+		}
+
+		// Verify via Mailpit
+		time.Sleep(200 * time.Millisecond)
+		messages := getMailpitMessages(t)
+		if len(messages) == 0 {
+			t.Error("no messages received")
+		} else {
+			msg := getMailpitMessageDetails(t, messages[0].ID)
+			if msg != nil && len(msg.To) != 2 {
+				t.Errorf("expected 2 To recipients, got %d", len(msg.To))
+			}
+		}
+	})
+
+	t.Run("JSON recipient list with vars", func(t *testing.T) {
+		clearMailpit(t)
+
+		// Create JSON recipient list with per-recipient vars
+		listFile := filepath.Join(tmpDir, "recipients_vars.json")
+		content := `[
+			{"email": "alice@example.com", "vars": {"name": "Alice", "order": "12345"}},
+			{"email": "bob@example.com", "vars": {"name": "Bob", "order": "67890"}}
+		]`
+		if err := os.WriteFile(listFile, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write recipient list: %v", err)
+		}
+
+		// Load and verify vars are parsed
+		recipients, recipientVars, err := mailxgo.LoadList(listFile, "json", true)
+		if err != nil {
+			t.Fatalf("LoadList failed: %v", err)
+		}
+		if len(recipients) != 2 {
+			t.Fatalf("expected 2 recipients, got %d", len(recipients))
+		}
+		if len(recipientVars) != 2 {
+			t.Fatalf("expected 2 var maps, got %d", len(recipientVars))
+		}
+		if recipientVars[0]["name"] != "Alice" {
+			t.Errorf("expected Alice, got %s", recipientVars[0]["name"])
+		}
+		if recipientVars[1]["order"] != "67890" {
+			t.Errorf("expected 67890, got %s", recipientVars[1]["order"])
+		}
+
+		// Send (vars not used yet, but parsed correctly)
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   smtpPort,
+			From:       "json-vars@example.com",
+			To:         recipients,
+			Subject:    "JSON List with Vars Test",
+			Body:       "Testing JSON recipient list with vars",
+			TLSMode:    "none",
+			NoAuth:     true,
+		}
+
+		res, err := mailxgo.SendEmail(params)
+		if err != nil {
+			t.Fatalf("SendEmail failed: %v", err)
+		}
+		if res.Status != "success" {
+			t.Errorf("expected success, got %s", res.Status)
+		}
+	})
+
+	t.Run("JSON attachment list", func(t *testing.T) {
+		clearMailpit(t)
+
+		// Create test attachments
+		att1 := filepath.Join(tmpDir, "doc1.txt")
+		att2 := filepath.Join(tmpDir, "doc2.txt")
+		if err := os.WriteFile(att1, []byte("Document 1"), 0o644); err != nil {
+			t.Fatalf("failed to create attachment: %v", err)
+		}
+		if err := os.WriteFile(att2, []byte("Document 2"), 0o644); err != nil {
+			t.Fatalf("failed to create attachment: %v", err)
+		}
+
+		// Create JSON attachment list (use forward slashes for JSON)
+		listFile := filepath.Join(tmpDir, "attachments.json")
+		content := `["` + filepath.ToSlash(att1) + `", "` + filepath.ToSlash(att2) + `"]`
+		if err := os.WriteFile(listFile, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write attachment list: %v", err)
+		}
+
+		// Load attachments
+		attachments, _, err := mailxgo.LoadList(listFile, "json", false)
+		if err != nil {
+			t.Fatalf("LoadList failed: %v", err)
+		}
+		if len(attachments) != 2 {
+			t.Fatalf("expected 2 attachments, got %d", len(attachments))
+		}
+
+		params := mailxgo.EmailParams{
+			SMTPServer:  smtpHost,
+			SMTPPort:    smtpPort,
+			From:        "json-attach@example.com",
+			To:          []string{"recipient@example.com"},
+			Subject:     "JSON Attachment List Test",
+			Body:        "Testing JSON attachment list",
+			Attachments: attachments,
+			TLSMode:     "none",
+			NoAuth:      true,
+		}
+
+		res, err := mailxgo.SendEmail(params)
+		if err != nil {
+			t.Fatalf("SendEmail failed: %v", err)
+		}
+		if res.Status != "success" {
+			t.Errorf("expected success, got %s", res.Status)
+		}
+
+		// Verify attachments via Mailpit
+		time.Sleep(200 * time.Millisecond)
+		messages := getMailpitMessages(t)
+		if len(messages) == 0 {
+			t.Error("no messages received")
+		} else {
+			msg := getMailpitMessageDetails(t, messages[0].ID)
+			if msg != nil && msg.Attachments != 2 {
+				t.Errorf("expected 2 attachments, got %d", msg.Attachments)
+			}
+		}
+	})
+
+	t.Run("text format fallback", func(t *testing.T) {
+		// Verify text format still works
+		listFile := filepath.Join(tmpDir, "recipients.txt")
+		content := "text1@example.com\ntext2@example.com\n# comment\n"
+		if err := os.WriteFile(listFile, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write recipient list: %v", err)
+		}
+
+		recipients, vars, err := mailxgo.LoadList(listFile, "text", true)
+		if err != nil {
+			t.Fatalf("LoadList text format failed: %v", err)
+		}
+		if vars != nil {
+			t.Error("expected nil vars for text format")
+		}
+		if len(recipients) != 2 {
+			t.Errorf("expected 2 recipients, got %d", len(recipients))
+		}
 	})
 }

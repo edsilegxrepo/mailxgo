@@ -291,7 +291,7 @@ func TestRunCLI_FullDispatch(t *testing.T) {
 		"--to-email", "to@example.com",
 		"--cc", "cc@example.com",
 		"--bcc", "bcc@example.com",
-		"--list", listFile,
+		"--recipient-list", listFile,
 		"--reply-to", "reply@example.com",
 		"--subject", "Test Subject",
 		"--body-file", bodyFile,
@@ -320,7 +320,7 @@ func TestRunCLI_FullDispatch(t *testing.T) {
 	badListArgs := []string{
 		"--smtp-server", "smtp.example.com",
 		"--from-email", "sender@example.com",
-		"--list", filepath.Join(tmpDir, "nonexistent.txt"),
+		"--recipient-list", filepath.Join(tmpDir, "nonexistent.txt"),
 		"--subject", "Subj",
 		"--body", "Body",
 	}

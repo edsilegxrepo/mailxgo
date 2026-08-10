@@ -71,7 +71,7 @@ sequenceDiagram
 ### 3.1 System Dependencies
 * **Go Compiler:** Go 1.22.0 or higher.
 * **Standard Library Dependencies:** `testing`, `net`, `crypto/tls`, `bufio`, `os`, `path/filepath`, `strings`, `sync`, `time`.
-* **Third-Party Libraries:** `github.com/wneessen/go-mail v0.4.0`.
+* **Third-Party Libraries:** `github.com/wneessen/go-mail v0.8.1`.
 
 ### 3.2 Constraints & Environment Isolation
 * Tests execute in isolated temporary directories (`t.TempDir()`).
@@ -151,6 +151,22 @@ sequenceDiagram
 | **Integration** | `TestLive_DiagnosticsWithTLSOptions` | E2E test of diagnostics with TLS options. | PASS on diagnostics with `ignore-trust` and CA cert. |
 | **Integration** | `TestLive_CLI_TLSOptions` | E2E test of CLI with TLS config options. | PASS on CLI send with TLS mode in config file. |
 | **OAuth2** | `TestLive_OAuth2_XOAUTH2Authentication` | E2E test of XOAUTH2 authentication via OAuth2 mock server. Subtests: XOAUTH2_ValidToken, XOAUTH2_TestToken, XOAUTH2_EncryptedToken, CLI_OAuth2. | PASS on successful XOAUTH2 auth with valid tokens, test tokens, encrypted tokens, and CLI flags. |
+| **Mailer Engine** | `TestSendEmail_MaxRecipients` | Tests `--max-recipients` limit guard for memory protection. | PASS on error when recipients exceed limit; success when within limit. |
+| **Mailer Engine** | `TestSendEmail_SingleRecipient` | Tests `--single-recipient` batch mode with rate limiting. | PASS on individual email per recipient with proper rate limiting. |
+| **Integration** | `TestLive_MaxRecipients` | E2E test of `--max-recipients` limit with live SMTP server. | PASS on rejection when exceeding limit; success when within limit. |
+| **Integration** | `TestLive_SingleRecipient` | E2E test of `--single-recipient` batch mode via Mailpit. | PASS on N separate emails for N recipients, each verified via Mailpit API. |
+| **Integration** | `TestLive_RunDiagnostics` | E2E test of `RunDiagnostics` with live Mailpit SMTP server. Subtests: basic diagnostics, capabilities, DNS info, JSON/NDJSON output, connection failure. | PASS on `status: success` with TCP/EHLO latency metrics; `status: error` for invalid port. |
+| **Integration** | `TestLive_OutputDiagReport` | E2E test of `OutputDiagReport` output modes with live diagnostic data. | PASS on text, JSON, NDJSON, and text+certs output modes. |
+| **Crypto** | `TestBuildTLSConfig` | Tests TLS config builder with all options. Subtests: default, ignore-trust, CA cert file, CA dir, fingerprint pinning, invalid CA, combined options. | PASS on correct TLS config for each scenario. |
+| **Mailer Engine** | `TestNoAuthSASL` | Tests `noAuthSASL` SASL implementation `Start()` and `Next()` methods. | PASS on correct PLAIN mechanism and anonymous credentials. |
+| **Mailer Engine** | `TestSendEmail_NoAuthMode` | Tests `--auth-type noauth` for unauthenticated relays. | PASS on successful send without authentication. |
+| **Mailer Engine** | `TestSendEmail_XOAUTH2Mode` | Tests `--auth-type xoauth2` OAuth2 authentication mode. | PASS on successful send with XOAUTH2 auth type. |
+| **Mailer Engine** | `TestSendEmail_CramMD5Mode` | Tests `--auth-type cram-md5` CRAM-MD5 authentication mode. | PASS on successful send with CRAM-MD5 auth type. |
+| **Mailer Engine** | `TestClassifyError_AllTypes` | Comprehensive error classification test for all error types (TLS, Auth, Connection, Send). | PASS on correct `ErrorType` for each error pattern. |
+| **Utilities** | `TestLoadRecipientListJSON` | Tests JSON parsing of recipient lists. Subtests: simple array, object array with vars, empty array, invalid email, invalid JSON, missing email field, whitespace trimming. | PASS on correct parsing and validation for all JSON formats. |
+| **Utilities** | `TestLoadAttachmentListJSON` | Tests JSON parsing of attachment lists. Subtests: valid array, empty array, invalid path, invalid JSON, skip empty strings. | PASS on correct parsing and path validation. |
+| **Utilities** | `TestLoadList` | Tests unified list loader with format selection. Subtests: text recipients, json recipients, default format, invalid format, text attachments, json attachments. | PASS on correct format dispatch and parsing. |
+| **Integration** | `TestLive_JSONListFormat` | E2E test of `--list-format json` with Mailpit. Subtests: JSON recipient list, JSON with vars, JSON attachment list, text format fallback. | PASS on successful send with JSON-parsed recipients and attachments. |
 | **CLI Binary** | `TestMainCompiles` | Asserts `cmd/mailxgo` package compiles without errors. | PASS on clean compilation. |
 
 ---
@@ -162,10 +178,10 @@ Statement coverage statistics measured across the workspace:
 
 | Package Path | Statement Coverage | Status ($\ge 80\%$) |
 | :--- | :--- | :--- |
-| `github.com/edsilegxrepo/mailxgo` (Unit Tests) | **84.6%** | PASS |
-| `github.com/edsilegxrepo/mailxgo` (With Integration Tag) | **90%+** | PASS |
+| `github.com/edsilegxrepo/mailxgo` (Unit Tests) | **82.5%** | PASS |
+| `github.com/edsilegxrepo/mailxgo` (With Integration Tag) | **86.7%** | PASS |
 | `github.com/edsilegxrepo/mailxgo/cmd/mailxgo` | Entry point only | N/A |
-| **Total Combined Workspace Coverage** | **85%+** | **PASS** |
+| **Total Combined Workspace Coverage** | **86%+** | **PASS** |
 
 ### 5.2 Refreshing Coverage Statistics
 To refresh and verify code coverage profile statistics locally:

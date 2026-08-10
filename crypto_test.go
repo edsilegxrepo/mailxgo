@@ -259,12 +259,146 @@ func TestDecryptSecret_EmptySecret(t *testing.T) {
 
 func TestDecryptSecret_EncryptedWithoutKey(t *testing.T) {
 	// Encrypted secret without master key should fail
-	os.Unsetenv("SECRETPROTECTOR_MASTER_KEY")
+	if err := os.Unsetenv("SECRETPROTECTOR_MASTER_KEY"); err != nil {
+		t.Fatalf("failed to unset env var: %v", err)
+	}
 	encrypted := "v1:gcm:someinvalidbase64data"
 	_, err := DecryptSecret(encrypted, "NONEXISTENT_ENV_VAR")
 	if err == nil {
 		t.Error("DecryptSecret expected error for encrypted secret without master key")
 	}
+}
+
+func TestBuildTLSConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a test CA cert for custom trust tests
+	certPEM := generateTestCertPEM(t)
+	certFile := filepath.Join(tmpDir, "ca.pem")
+	if err := os.WriteFile(certFile, certPEM, 0o644); err != nil {
+		t.Fatalf("failed to write cert: %v", err)
+	}
+
+	certDir := filepath.Join(tmpDir, "certs")
+	if err := os.Mkdir(certDir, 0o755); err != nil {
+		t.Fatalf("failed to create cert dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(certDir, "ca.pem"), certPEM, 0o644); err != nil {
+		t.Fatalf("failed to write cert to dir: %v", err)
+	}
+
+	t.Run("default TLS config", func(t *testing.T) {
+		config, err := BuildTLSConfig(TLSConfigParams{
+			ServerName: "smtp.example.com",
+			TLSMode:    "tls",
+		})
+		if err != nil {
+			t.Fatalf("BuildTLSConfig failed: %v", err)
+		}
+		if config.ServerName != "smtp.example.com" {
+			t.Errorf("expected ServerName smtp.example.com, got %s", config.ServerName)
+		}
+		if config.InsecureSkipVerify {
+			t.Error("InsecureSkipVerify should be false for tls mode")
+		}
+		if config.MinVersion != 0x0303 { // TLS 1.2
+			t.Errorf("expected MinVersion TLS 1.2, got %x", config.MinVersion)
+		}
+	})
+
+	t.Run("ignore-trust mode", func(t *testing.T) {
+		config, err := BuildTLSConfig(TLSConfigParams{
+			ServerName: "internal.local",
+			TLSMode:    "ignore-trust",
+		})
+		if err != nil {
+			t.Fatalf("BuildTLSConfig failed: %v", err)
+		}
+		if !config.InsecureSkipVerify {
+			t.Error("InsecureSkipVerify should be true for ignore-trust mode")
+		}
+	})
+
+	t.Run("with custom CA cert file", func(t *testing.T) {
+		config, err := BuildTLSConfig(TLSConfigParams{
+			ServerName: "smtp.example.com",
+			TLSMode:    "tls",
+			TLSCACert:  certFile,
+		})
+		if err != nil {
+			t.Fatalf("BuildTLSConfig with CA cert failed: %v", err)
+		}
+		if config.RootCAs == nil {
+			t.Error("RootCAs should be set when CA cert is provided")
+		}
+		if config.InsecureSkipVerify {
+			t.Error("InsecureSkipVerify should be false when custom CA is provided")
+		}
+	})
+
+	t.Run("with custom CA cert directory", func(t *testing.T) {
+		config, err := BuildTLSConfig(TLSConfigParams{
+			ServerName: "smtp.example.com",
+			TLSMode:    "tls",
+			TLSCADir:   certDir,
+		})
+		if err != nil {
+			t.Fatalf("BuildTLSConfig with CA dir failed: %v", err)
+		}
+		if config.RootCAs == nil {
+			t.Error("RootCAs should be set when CA dir is provided")
+		}
+	})
+
+	t.Run("with fingerprint pinning", func(t *testing.T) {
+		fingerprint := "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+		config, err := BuildTLSConfig(TLSConfigParams{
+			ServerName:     "smtp.example.com",
+			TLSMode:        "tls",
+			TLSFingerprint: fingerprint,
+		})
+		if err != nil {
+			t.Fatalf("BuildTLSConfig with fingerprint failed: %v", err)
+		}
+		if config.VerifyPeerCertificate == nil {
+			t.Error("VerifyPeerCertificate should be set for fingerprint pinning")
+		}
+		if !config.InsecureSkipVerify {
+			t.Error("InsecureSkipVerify should be true for fingerprint pinning (uses custom verifier)")
+		}
+	})
+
+	t.Run("with invalid CA cert file", func(t *testing.T) {
+		_, err := BuildTLSConfig(TLSConfigParams{
+			ServerName: "smtp.example.com",
+			TLSMode:    "tls",
+			TLSCACert:  filepath.Join(tmpDir, "nonexistent.pem"),
+		})
+		if err == nil {
+			t.Error("expected error for non-existent CA cert")
+		}
+	})
+
+	t.Run("combined CA cert and fingerprint", func(t *testing.T) {
+		fingerprint := "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+		config, err := BuildTLSConfig(TLSConfigParams{
+			ServerName:     "smtp.example.com",
+			TLSMode:        "tls",
+			TLSCACert:      certFile,
+			TLSFingerprint: fingerprint,
+		})
+		if err != nil {
+			t.Fatalf("BuildTLSConfig with CA and fingerprint failed: %v", err)
+		}
+		// Fingerprint takes precedence
+		if config.VerifyPeerCertificate == nil {
+			t.Error("VerifyPeerCertificate should be set")
+		}
+		// RootCAs should still be loaded
+		if config.RootCAs == nil {
+			t.Error("RootCAs should still be set")
+		}
+	})
 }
 
 // Helper: generate a test certificate PEM

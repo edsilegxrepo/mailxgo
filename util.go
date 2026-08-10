@@ -15,6 +15,7 @@ package mailxgo
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -88,6 +89,108 @@ func ValidateFilePath(path string) error {
 	}
 
 	return nil
+}
+
+// ValidateFileExists validates a file path is absolute and exists.
+// Returns the cleaned absolute path or an error.
+func ValidateFileExists(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("file path cannot be empty")
+	}
+
+	// Validate path format
+	if err := ValidateFilePath(path); err != nil {
+		return "", err
+	}
+
+	// Clean and make absolute
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve absolute path: %w", err)
+	}
+
+	// Check file exists
+	info, err := os.Stat(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("file does not exist: %s", absPath)
+		}
+		return "", fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	if info.IsDir() {
+		return "", fmt.Errorf("path is a directory, not a file: %s", absPath)
+	}
+
+	return absPath, nil
+}
+
+// ValidateDirExists validates a directory path is absolute and exists (or can be created).
+// If mustExist is false, validates the path format only.
+// Returns the cleaned absolute path or an error.
+func ValidateDirExists(path string, mustExist bool) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("directory path cannot be empty")
+	}
+
+	// Validate path format
+	if err := ValidateFilePath(path); err != nil {
+		return "", err
+	}
+
+	// Clean and make absolute
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve absolute path: %w", err)
+	}
+
+	if mustExist {
+		info, err := os.Stat(absPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return "", fmt.Errorf("directory does not exist: %s", absPath)
+			}
+			return "", fmt.Errorf("failed to stat directory: %w", err)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("path is not a directory: %s", absPath)
+		}
+	}
+
+	return absPath, nil
+}
+
+// ValidateOutputPath validates an output file/directory path is absolute and writable.
+// Creates parent directories if they don't exist.
+// Returns the cleaned absolute path or an error.
+func ValidateOutputPath(path string, isDir bool) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("output path cannot be empty")
+	}
+
+	// Validate path format
+	if err := ValidateFilePath(path); err != nil {
+		return "", err
+	}
+
+	// Clean and make absolute
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve absolute path: %w", err)
+	}
+
+	// Determine parent directory
+	parentDir := absPath
+	if !isDir {
+		parentDir = filepath.Dir(absPath)
+	}
+
+	// Create parent directories if needed (0750 restricts to owner and group)
+	if err := os.MkdirAll(parentDir, 0o750); err != nil {
+		return "", fmt.Errorf("failed to create directory %s: %w", parentDir, err)
+	}
+
+	return absPath, nil
 }
 
 // CleanEmailList trims whitespace from email addresses and removes empty elements.
@@ -183,4 +286,117 @@ func ScanAttachmentDir(dir string) ([]string, error) {
 		}
 	}
 	return files, nil
+}
+
+// RecipientEntry represents a recipient in JSON format with optional template variables.
+type RecipientEntry struct {
+	Email string            `json:"email"`
+	Vars  map[string]string `json:"vars,omitempty"`
+}
+
+// LoadRecipientListJSON reads a JSON file containing recipient email addresses.
+// Supports two formats:
+//   - Simple array: ["alice@example.com", "bob@example.com"]
+//   - Object array: [{"email": "alice@example.com", "vars": {"name": "Alice"}}]
+//
+// Returns recipients and per-recipient template variables (nil if simple array format).
+func LoadRecipientListJSON(path string) ([]string, []map[string]string, error) {
+	// #nosec G304 -- Path validated by caller via ValidateFileExists
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read JSON recipient list: %w", err)
+	}
+
+	// Try simple string array first
+	var simpleList []string
+	if err := json.Unmarshal(data, &simpleList); err == nil {
+		// Validate emails
+		for i, email := range simpleList {
+			simpleList[i] = strings.TrimSpace(email)
+			if simpleList[i] == "" {
+				continue
+			}
+			if err := ValidateEmail(simpleList[i]); err != nil {
+				return nil, nil, fmt.Errorf("invalid email at index %d: %w", i, err)
+			}
+		}
+		return CleanEmailList(simpleList), nil, nil
+	}
+
+	// Try object array with per-recipient vars
+	var objectList []RecipientEntry
+	if err := json.Unmarshal(data, &objectList); err != nil {
+		return nil, nil, fmt.Errorf("invalid JSON format: expected array of strings or objects with 'email' field: %w", err)
+	}
+
+	recipients := make([]string, 0, len(objectList))
+	recipientVars := make([]map[string]string, 0, len(objectList))
+
+	for i, entry := range objectList {
+		email := strings.TrimSpace(entry.Email)
+		if email == "" {
+			return nil, nil, fmt.Errorf("empty email at index %d", i)
+		}
+		if err := ValidateEmail(email); err != nil {
+			return nil, nil, fmt.Errorf("invalid email at index %d: %w", i, err)
+		}
+		recipients = append(recipients, email)
+		recipientVars = append(recipientVars, entry.Vars)
+	}
+
+	return recipients, recipientVars, nil
+}
+
+// LoadAttachmentListJSON reads a JSON file containing attachment file paths.
+// Format: ["path/to/file1.pdf", "path/to/file2.xlsx"]
+// Security: Validates each path to prevent path traversal attacks.
+func LoadAttachmentListJSON(path string) ([]string, error) {
+	// #nosec G304 -- Path validated by caller via ValidateFileExists
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read JSON attachment list: %w", err)
+	}
+
+	var files []string
+	if err := json.Unmarshal(data, &files); err != nil {
+		return nil, fmt.Errorf("invalid JSON format: expected array of strings: %w", err)
+	}
+
+	// Validate and clean paths
+	validated := make([]string, 0, len(files))
+	for i, filePath := range files {
+		filePath = strings.TrimSpace(filePath)
+		if filePath == "" {
+			continue
+		}
+		if err := ValidateFilePath(filePath); err != nil {
+			return nil, fmt.Errorf("invalid path at index %d: %w", i, err)
+		}
+		validated = append(validated, filePath)
+	}
+
+	return validated, nil
+}
+
+// LoadList reads a list file in the specified format (text or json).
+// For recipients, returns the list and optional per-recipient template variables.
+// For attachments, recipientVars will be nil.
+func LoadList(path string, format string, isRecipients bool) ([]string, []map[string]string, error) {
+	switch strings.ToLower(format) {
+	case "json":
+		if isRecipients {
+			return LoadRecipientListJSON(path)
+		}
+		files, err := LoadAttachmentListJSON(path)
+		return files, nil, err
+	case "text", "":
+		if isRecipients {
+			recipients, err := LoadRecipientList(path)
+			return recipients, nil, err
+		}
+		files, err := LoadAttachmentList(path)
+		return files, nil, err
+	default:
+		return nil, nil, fmt.Errorf("unsupported list format: %s (use 'text' or 'json')", format)
+	}
 }

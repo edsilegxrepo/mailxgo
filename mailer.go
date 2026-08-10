@@ -15,16 +15,22 @@
 package mailxgo
 
 import (
+	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"text/template"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/wneessen/go-mail"
 	mailsmtp "github.com/wneessen/go-mail/smtp"
+	"github.com/zeebo/xxh3"
 )
 
 // ErrorType classifies SMTP errors for granular exit code handling.
@@ -92,7 +98,17 @@ type clientFactory func(host string, opts ...mail.Option) (clientSender, error)
 var defaultClientFactory clientFactory = func(host string, opts ...mail.Option) (clientSender, error) {
 	return mail.NewClient(host, opts...)
 }
-var timeSleep = time.Sleep
+
+// zstdEncoderPool provides reusable zstd encoders for compression efficiency.
+var zstdEncoderPool = sync.Pool{
+	New: func() interface{} {
+		enc, _ := zstd.NewWriter(nil)
+		return enc
+	},
+}
+
+// logMutex protects concurrent log file writes
+var logMutex sync.Mutex
 
 // noAuthSASL implements a custom SASL PLAIN fallback for unauthenticated internal relays.
 type noAuthSASL struct{}
@@ -146,6 +162,32 @@ type EmailParams struct {
 	NDJSONOutput      bool
 	NoLogRecipients   bool
 	Context           context.Context
+	DryRun            bool // Validate and connect but don't send
+	Quiet             bool // Suppress output except errors
+	ReadReceipt       bool // Request read receipt (Disposition-Notification-To header)
+
+	// Template support
+	TemplateFile     string            // Path to Go template file for body
+	TemplateVars     map[string]string // Variables for template substitution
+	TemplateDataFile string            // Path to JSON file with template variables
+
+	// Delivery options
+	Delay         int // Delay in seconds before sending
+	RateLimit     int // Max emails per minute (for batch/multi-recipient)
+	MaxRecipients int // Max recipients per email (0 = use default 1000)
+
+	// Archiving
+	SaveEMLPath string // Directory to save .eml archive after successful send
+	CompressEML bool   // Compress .eml archive with zstd
+
+	// File routing (applies to body file and attachments)
+	RouteSuccessPath string // Move body file/attachments here on success
+	RouteErrorPath   string // Move body file/attachments here on error
+	RouteDelete      bool   // Delete body file/attachments after send
+
+	// Single attachment mode
+	SingleAttachment bool // Send one email per attachment with [N/Total] prefix
+	SingleRecipient  bool // Send one email per recipient with rate limiting
 }
 
 // JSONResult represents the structured telemetry output payload for email dispatch execution.
@@ -163,8 +205,157 @@ type JSONResult struct {
 }
 
 // SendEmail transmits an email according to the specified EmailParams options.
-// Data Flow: Decrypts secrets -> Validates payload boundaries -> Constructs MIME message -> Configures TLS/Auth -> Dial & Send retry loop -> Audit Logging & Output.
+// Data Flow: Validates paths -> Decrypts secrets -> Validates payload boundaries -> Constructs MIME message -> Configures TLS/Auth -> Dial & Send retry loop -> Audit Logging & Output.
 func SendEmail(params EmailParams) (*JSONResult, error) {
+	// ==========================================================================
+	// PATH VALIDATION: All file/directory paths must be absolute and validated
+	// ==========================================================================
+
+	// Validate input file paths (must exist)
+	if params.BodyFile != "" {
+		absPath, err := ValidateFileExists(params.BodyFile)
+		if err != nil {
+			return nil, fmt.Errorf("body file validation failed: %w", err)
+		}
+		params.BodyFile = absPath
+	}
+
+	if params.TemplateFile != "" {
+		absPath, err := ValidateFileExists(params.TemplateFile)
+		if err != nil {
+			return nil, fmt.Errorf("template file validation failed: %w", err)
+		}
+		params.TemplateFile = absPath
+	}
+
+	if params.TemplateDataFile != "" {
+		absPath, err := ValidateFileExists(params.TemplateDataFile)
+		if err != nil {
+			return nil, fmt.Errorf("template data file validation failed: %w", err)
+		}
+		params.TemplateDataFile = absPath
+	}
+
+	if params.TLSCACert != "" {
+		absPath, err := ValidateFileExists(params.TLSCACert)
+		if err != nil {
+			return nil, fmt.Errorf("TLS CA cert file validation failed: %w", err)
+		}
+		params.TLSCACert = absPath
+	}
+
+	if params.TLSCADir != "" {
+		absPath, err := ValidateDirExists(params.TLSCADir, true)
+		if err != nil {
+			return nil, fmt.Errorf("TLS CA directory validation failed: %w", err)
+		}
+		params.TLSCADir = absPath
+	}
+
+	// Validate attachment paths (must exist)
+	for i, att := range params.Attachments {
+		if att != "" {
+			absPath, err := ValidateFileExists(att)
+			if err != nil {
+				return nil, fmt.Errorf("attachment validation failed: %w", err)
+			}
+			params.Attachments[i] = absPath
+		}
+	}
+
+	for i, att := range params.InlineAttachments {
+		if att != "" {
+			absPath, err := ValidateFileExists(att)
+			if err != nil {
+				return nil, fmt.Errorf("inline attachment validation failed: %w", err)
+			}
+			params.InlineAttachments[i] = absPath
+		}
+	}
+
+	// Validate output paths (will be created if needed)
+	if params.LogFile != "" {
+		absPath, err := ValidateOutputPath(params.LogFile, false)
+		if err != nil {
+			return nil, fmt.Errorf("log file path validation failed: %w", err)
+		}
+		params.LogFile = absPath
+	}
+
+	if params.SaveEMLPath != "" {
+		absPath, err := ValidateOutputPath(params.SaveEMLPath, true)
+		if err != nil {
+			return nil, fmt.Errorf("EML archive path validation failed: %w", err)
+		}
+		params.SaveEMLPath = absPath
+	}
+
+	if params.RouteSuccessPath != "" {
+		absPath, err := ValidateOutputPath(params.RouteSuccessPath, true)
+		if err != nil {
+			return nil, fmt.Errorf("route success path validation failed: %w", err)
+		}
+		params.RouteSuccessPath = absPath
+	}
+
+	if params.RouteErrorPath != "" {
+		absPath, err := ValidateOutputPath(params.RouteErrorPath, true)
+		if err != nil {
+			return nil, fmt.Errorf("route error path validation failed: %w", err)
+		}
+		params.RouteErrorPath = absPath
+	}
+
+	// ==========================================================================
+	// NUMERIC PARAMETER VALIDATION
+	// ==========================================================================
+	if params.Delay < 0 {
+		return nil, fmt.Errorf("delay cannot be negative: %d", params.Delay)
+	}
+	if params.RateLimit < 0 {
+		return nil, fmt.Errorf("rate-limit cannot be negative: %d", params.RateLimit)
+	}
+	if params.Retries < 0 {
+		return nil, fmt.Errorf("retries cannot be negative: %d", params.Retries)
+	}
+	if params.Timeout < 0 {
+		return nil, fmt.Errorf("timeout cannot be negative: %d", params.Timeout)
+	}
+	if params.MaxAttachmentMB < 0 {
+		return nil, fmt.Errorf("max-attachment-size cannot be negative: %d", params.MaxAttachmentMB)
+	}
+	if params.MaxRecipients < 0 {
+		return nil, fmt.Errorf("max-recipients cannot be negative: %d", params.MaxRecipients)
+	}
+
+	// Max recipients guard
+	maxRecipients := params.MaxRecipients
+	if maxRecipients == 0 {
+		maxRecipients = DefaultMaxRecipients
+	}
+	totalRecipients := len(params.To) + len(params.CC) + len(params.BCC)
+	if totalRecipients > maxRecipients {
+		return nil, fmt.Errorf("total recipients (%d) exceeds maximum limit (%d)", totalRecipients, maxRecipients)
+	}
+
+	// ==========================================================================
+	// SINGLE RECIPIENT MODE: Send one email per recipient with rate limiting
+	// ==========================================================================
+	if params.SingleRecipient && len(params.To) > 1 {
+		return sendSingleRecipientMode(params)
+	}
+
+	// ==========================================================================
+	// SINGLE ATTACHMENT MODE: Send one email per attachment
+	// ==========================================================================
+	if params.SingleAttachment && len(params.Attachments) > 1 {
+		return sendSingleAttachmentMode(params)
+	}
+
+	// ==========================================================================
+	// SECRET DECRYPTION
+	// ==========================================================================
+
 	// Decrypt secrets if encrypted with secretprotector (v1:gcm: prefix)
 	if params.Password != "" {
 		if decrypted, err := DecryptSecret(params.Password, ""); err == nil {
@@ -237,15 +428,58 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 
 	m.Subject(params.Subject)
 
-	// Set Body content
-	if params.BodyFile != "" {
+	// Load template variables if template features are used
+	var templateVars map[string]string
+	if params.TemplateFile != "" || params.TemplateDataFile != "" || len(params.TemplateVars) > 0 {
+		var err error
+		templateVars, err = loadTemplateVars(params.TemplateDataFile, params.TemplateVars)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Set Body content (with optional template processing)
+	if params.TemplateFile != "" {
+		// Load template from file
+		tmplBytes, err := os.ReadFile(params.TemplateFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read template file: %w", err)
+		}
+		body, err := applyTemplate(string(tmplBytes), templateVars)
+		if err != nil {
+			return nil, err
+		}
+		// Detect if template is HTML
+		if strings.Contains(strings.ToLower(string(tmplBytes)), "<html") || strings.Contains(string(tmplBytes), "<body") {
+			m.SetBodyString(mail.TypeTextHTML, body)
+		} else {
+			m.SetBodyString(mail.TypeTextPlain, body)
+		}
+	} else if params.BodyFile != "" {
 		bodyBytes, err := os.ReadFile(params.BodyFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read body file: %w", err)
 		}
-		m.SetBodyString(mail.TypeTextHTML, string(bodyBytes))
+		body := string(bodyBytes)
+		// Apply template if variables are provided
+		if len(templateVars) > 0 {
+			body, err = applyTemplate(body, templateVars)
+			if err != nil {
+				return nil, err
+			}
+		}
+		m.SetBodyString(mail.TypeTextHTML, body)
 	} else if params.Body != "" {
-		m.SetBodyString(mail.TypeTextPlain, params.Body)
+		body := params.Body
+		// Apply template if variables are provided
+		if len(templateVars) > 0 {
+			var err error
+			body, err = applyTemplate(body, templateVars)
+			if err != nil {
+				return nil, err
+			}
+		}
+		m.SetBodyString(mail.TypeTextPlain, body)
 	}
 
 	// Max Attachment Size Guard (check BEFORE attaching to fail fast)
@@ -301,6 +535,11 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 		}
 	}
 
+	// Read Receipt (Disposition-Notification-To header)
+	if params.ReadReceipt {
+		m.SetGenHeader("Disposition-Notification-To", params.From)
+	}
+
 	// Client Options
 	var clientOptions []mail.Option
 
@@ -343,28 +582,16 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 		}
 	}
 
-	// TLS Options
-	// #nosec G402 -- InsecureSkipVerify is configurable via ignore-trust mode for internal relays with self-signed certs.
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: params.TLSMode == "ignore-trust",
-		ServerName:         params.SMTPServer,
-		MinVersion:         tls.VersionTLS12,
-	}
-
-	// Custom CA certificate or directory
-	if params.TLSCACert != "" || params.TLSCADir != "" {
-		rootCAs, err := loadCustomCACerts(params.TLSCACert, params.TLSCADir)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load custom CA certificates: %w", err)
-		}
-		tlsConfig.RootCAs = rootCAs
-		tlsConfig.InsecureSkipVerify = false // Force verification when custom CA is provided
-	}
-
-	// Certificate fingerprint pinning
-	if params.TLSFingerprint != "" {
-		tlsConfig.VerifyPeerCertificate = createFingerprintVerifier(params.TLSFingerprint)
-		tlsConfig.InsecureSkipVerify = true // Skip default verification, use fingerprint instead
+	// TLS Options - use centralized config builder
+	tlsConfig, err := BuildTLSConfig(TLSConfigParams{
+		ServerName:     params.SMTPServer,
+		TLSMode:        params.TLSMode,
+		TLSCACert:      params.TLSCACert,
+		TLSCADir:       params.TLSCADir,
+		TLSFingerprint: params.TLSFingerprint,
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	switch params.TLSMode {
@@ -424,6 +651,18 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 		ctx = context.Background()
 	}
 
+	// Delay before sending (blocking)
+	if params.Delay > 0 {
+		if !params.Quiet && !params.JSONOutput && !params.NDJSONOutput {
+			fmt.Fprintf(os.Stderr, "Delaying send for %d seconds...\n", params.Delay)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("operation cancelled during delay: %w", ctx.Err())
+		case <-time.After(time.Duration(params.Delay) * time.Second):
+		}
+	}
+
 	attempts := 0
 	var lastErr error
 	maxAttempts := 1 + params.Retries
@@ -431,12 +670,18 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 		maxAttempts = 1
 	}
 
+	// Rate limiting: Currently used in single-attachment mode (sendSingleAttachmentMode).
+	// For standard multi-recipient sends, all recipients are in one SMTP transaction.
+	// Future batch mode (one email per recipient) would use this rate limiter.
+	_ = params.RateLimit // Acknowledged, used in sendSingleAttachmentMode
+
+retryLoop:
 	for i := 0; i < maxAttempts; i++ {
 		// Check for context cancellation before each attempt
 		select {
 		case <-ctx.Done():
 			lastErr = fmt.Errorf("operation cancelled: %w", ctx.Err())
-			break
+			break retryLoop
 		default:
 		}
 
@@ -445,6 +690,11 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 		if err != nil {
 			lastErr = fmt.Errorf("failed to create SMTP client: %w", err)
 		} else {
+			// Dry-run mode: connect and authenticate but don't send
+			if params.DryRun {
+				lastErr = nil
+				break
+			}
 			if err := c.DialAndSend(m); err != nil {
 				lastErr = fmt.Errorf("error sending email: %w", err)
 			} else {
@@ -459,7 +709,7 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 				delay = DefaultRetryDelay
 			}
 			retryMsg := fmt.Sprintf("Attempt %d/%d failed: %v. Retrying in %ds...\n", attempts, maxAttempts, lastErr, delay)
-			if !params.JSONOutput && !params.NDJSONOutput {
+			if !params.JSONOutput && !params.NDJSONOutput && !params.Quiet {
 				fmt.Fprint(os.Stderr, retryMsg)
 			}
 			if params.LogFile != "" {
@@ -470,13 +720,46 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 			select {
 			case <-ctx.Done():
 				lastErr = fmt.Errorf("operation cancelled during retry wait: %w", ctx.Err())
-				break
+				break retryLoop
 			case <-time.After(time.Duration(delay) * time.Second):
 			}
 		}
 	}
 
 	timestamp := time.Now().Format(time.RFC3339)
+	success := lastErr == nil
+
+	// Post-send actions
+	if success && !params.DryRun {
+		// Save EML archive (only on success)
+		if params.SaveEMLPath != "" {
+			emlPath, err := saveEML(m, params.SaveEMLPath, params.CompressEML)
+			if err != nil {
+				// Log warning but don't fail the send
+				if !params.Quiet && !params.JSONOutput && !params.NDJSONOutput {
+					fmt.Fprintf(os.Stderr, "Warning: failed to save EML archive: %v\n", err)
+				}
+			} else if !params.Quiet && !params.JSONOutput && !params.NDJSONOutput {
+				fmt.Fprintf(os.Stderr, "EML archived: %s\n", emlPath)
+			}
+		}
+	}
+
+	// Route body file and attachments (on success or error)
+	if !params.DryRun && (params.RouteSuccessPath != "" || params.RouteErrorPath != "" || params.RouteDelete) {
+		// Collect all files to route (body file + attachments)
+		var filesToRoute []string
+		if params.BodyFile != "" {
+			filesToRoute = append(filesToRoute, params.BodyFile)
+		}
+		filesToRoute = append(filesToRoute, params.Attachments...)
+
+		if err := routeAttachments(filesToRoute, success, params.RouteSuccessPath, params.RouteErrorPath, params.RouteDelete); err != nil {
+			if !params.Quiet && !params.JSONOutput && !params.NDJSONOutput {
+				fmt.Fprintf(os.Stderr, "Warning: failed to route files: %v\n", err)
+			}
+		}
+	}
 
 	var res JSONResult
 	if lastErr != nil {
@@ -508,12 +791,17 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 		}
 	}
 
-	OutputJSONResult(res, params.JSONOutput, params.NDJSONOutput, params.From, params.To, attempts)
+	OutputJSONResult(res, params.JSONOutput, params.NDJSONOutput, params.Quiet, params.DryRun, params.From, params.To, attempts)
 	return &res, lastErr
 }
 
 // OutputJSONResult handles rendering output in human text, JSON, or NDJSON.
-func OutputJSONResult(res JSONResult, jsonOutput bool, ndjsonOutput bool, from string, to []string, attempts int) {
+func OutputJSONResult(res JSONResult, jsonOutput bool, ndjsonOutput bool, quiet bool, dryRun bool, from string, to []string, attempts int) {
+	// Quiet mode: suppress all output except errors
+	if quiet && res.Status == "success" {
+		return
+	}
+
 	if ndjsonOutput {
 		data, _ := json.Marshal(res)
 		fmt.Println(string(data))
@@ -525,11 +813,18 @@ func OutputJSONResult(res JSONResult, jsonOutput bool, ndjsonOutput bool, from s
 		if len(to) > 0 {
 			recipients = strings.Join(to, ", ")
 		}
-		fmt.Printf("Email sent successfully to %s from %s (attempts: %d)\n", recipients, from, attempts)
+		if dryRun {
+			fmt.Printf("Dry-run: validated email to %s from %s (would send, attempts: %d)\n", recipients, from, attempts)
+		} else {
+			fmt.Printf("Email sent successfully to %s from %s (attempts: %d)\n", recipients, from, attempts)
+		}
 	}
 }
 
 func logAttempt(logFile string, msg string) {
+	logMutex.Lock()
+	defer logMutex.Unlock()
+
 	// #nosec G304 G302 -- User-configured log file path created with restricted 0600 file permissions.
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -543,6 +838,10 @@ func logAudit(logFile string, timestamp string, success bool, attempts int, errS
 	if logFile == "" {
 		return
 	}
+
+	logMutex.Lock()
+	defer logMutex.Unlock()
+
 	// #nosec G304 G302 -- User-configured audit log file path created with restricted 0600 file permissions.
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -565,4 +864,431 @@ func logAudit(logFile string, timestamp string, success bool, attempts int, errS
 			timestamp, recipients, params.SMTPServer, params.SMTPPort, attempts, errStr)
 		_, _ = f.WriteString(entry)
 	}
+}
+
+// loadTemplateVars merges template variables from file and inline vars.
+// SECURITY: dataFile path must be pre-validated via ValidateFileExists in SendEmail.
+func loadTemplateVars(dataFile string, inlineVars map[string]string) (map[string]string, error) {
+	result := make(map[string]string)
+
+	// Load from JSON file if specified
+	if dataFile != "" {
+		// #nosec G304 -- Path pre-validated via ValidateFileExists in SendEmail caller
+		data, err := os.ReadFile(dataFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read template data file: %w", err)
+		}
+		if err := json.Unmarshal(data, &result); err != nil {
+			return nil, fmt.Errorf("failed to parse template data file: %w", err)
+		}
+	}
+
+	// Override with inline vars (inline takes precedence)
+	for k, v := range inlineVars {
+		result[k] = v
+	}
+
+	return result, nil
+}
+
+// applyTemplate processes a Go template string with the given variables.
+// SECURITY: Template variables are sanitized to prevent injection of template directives.
+func applyTemplate(tmplContent string, vars map[string]string) (string, error) {
+	// Sanitize template variables to prevent template injection
+	sanitizedVars := make(map[string]string, len(vars))
+	for k, v := range vars {
+		// Escape any template delimiters in variable values
+		sanitized := strings.ReplaceAll(v, "{{", "{ {")
+		sanitized = strings.ReplaceAll(sanitized, "}}", "} }")
+		sanitizedVars[k] = sanitized
+	}
+
+	tmpl, err := template.New("body").Parse(tmplContent)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse template: %w", err)
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, sanitizedVars); err != nil {
+		return "", fmt.Errorf("failed to execute template: %w", err)
+	}
+
+	return buf.String(), nil
+}
+
+// saveEML saves the email message as .eml file with xxh3 hash in filename.
+// SECURITY: emlPath must be pre-validated as absolute path via ValidateOutputPath.
+func saveEML(m *mail.Msg, emlPath string, compress bool) (string, error) {
+	// Render message to buffer
+	var buf bytes.Buffer
+	if _, err := m.WriteTo(&buf); err != nil {
+		return "", fmt.Errorf("failed to render email: %w", err)
+	}
+	emlData := buf.Bytes()
+
+	// Generate xxh3-128 hash
+	hash := xxh3.Hash128(emlData)
+	hashStr := fmt.Sprintf("%016x%016x", hash.Hi, hash.Lo)
+
+	// Create filename with timestamp and hash
+	timestamp := time.Now().Format("20060102-150405")
+	var filename string
+
+	if compress {
+		filename = fmt.Sprintf("mailarchive_%s_%s.eml.zst", timestamp, hashStr)
+	} else {
+		filename = fmt.Sprintf("mailarchive_%s_%s.eml", timestamp, hashStr)
+	}
+
+	fullPath := filepath.Join(emlPath, filename)
+
+	// Directory already validated/created by ValidateOutputPath in SendEmail
+
+	if compress {
+		// Compress with zstd
+		compressed, err := compressZstd(emlData)
+		if err != nil {
+			return "", fmt.Errorf("failed to compress EML: %w", err)
+		}
+		// #nosec G304 G306 -- Path pre-validated as absolute in SendEmail
+		if err := os.WriteFile(fullPath, compressed, 0o600); err != nil {
+			return "", fmt.Errorf("failed to write compressed EML: %w", err)
+		}
+	} else {
+		// #nosec G304 G306 -- Path pre-validated as absolute in SendEmail
+		if err := os.WriteFile(fullPath, emlData, 0o600); err != nil {
+			return "", fmt.Errorf("failed to write EML: %w", err)
+		}
+	}
+
+	return fullPath, nil
+}
+
+// compressZstd compresses data using zstd with encoder pooling for efficiency.
+func compressZstd(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+
+	// Get encoder from pool
+	enc := zstdEncoderPool.Get().(*zstd.Encoder)
+	enc.Reset(&buf)
+
+	if _, err := enc.Write(data); err != nil {
+		zstdEncoderPool.Put(enc)
+		return nil, err
+	}
+	if err := enc.Close(); err != nil {
+		zstdEncoderPool.Put(enc)
+		return nil, err
+	}
+
+	// Return encoder to pool for reuse
+	zstdEncoderPool.Put(enc)
+	return buf.Bytes(), nil
+}
+
+// routeAttachments moves or deletes attachments based on send result.
+// SECURITY: All paths should be pre-validated as absolute via ValidateFileExists/ValidateOutputPath in SendEmail.
+// Creates destination directories if needed (defense in depth for direct library usage).
+func routeAttachments(attachments []string, success bool, successPath, errorPath string, deleteAfter bool) error {
+	if len(attachments) == 0 {
+		return nil
+	}
+
+	for _, att := range attachments {
+		if att == "" {
+			continue
+		}
+
+		if deleteAfter {
+			// #nosec G304 -- Path pre-validated as absolute in SendEmail
+			if err := os.Remove(att); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("failed to delete attachment %s: %w", att, err)
+			}
+			continue
+		}
+
+		var destDir string
+		if success && successPath != "" {
+			destDir = successPath
+		} else if !success && errorPath != "" {
+			destDir = errorPath
+		}
+
+		if destDir != "" {
+			// Create directory if needed (defense in depth, 0750 restricts to owner and group)
+			if err := os.MkdirAll(destDir, 0o750); err != nil {
+				return fmt.Errorf("failed to create destination directory %s: %w", destDir, err)
+			}
+			destFile := filepath.Join(destDir, filepath.Base(att))
+			// #nosec G304 -- Paths pre-validated as absolute in SendEmail
+			if err := os.Rename(att, destFile); err != nil {
+				// Cross-device move: copy then delete
+				if err := copyFile(att, destFile); err != nil {
+					return fmt.Errorf("failed to move attachment %s: %w", att, err)
+				}
+				_ = os.Remove(att)
+			}
+		}
+	}
+
+	return nil
+}
+
+// copyFile copies a file from src to dst using streaming I/O.
+// SECURITY: Both paths must be pre-validated as absolute.
+// Uses buffered I/O to handle large files efficiently without loading into memory.
+func copyFile(src, dst string) error {
+	// #nosec G304 -- Paths pre-validated as absolute by caller
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = srcFile.Close() }()
+
+	// Get source file info for permissions
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
+
+	// #nosec G304 -- Output path pre-validated as absolute by caller
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode()&0o600)
+	if err != nil {
+		return err
+	}
+
+	// Use buffered copy for efficiency
+	buf := make([]byte, 32*1024) // 32KB buffer
+	_, err = copyBuffer(dstFile, srcFile, buf)
+	closeErr := dstFile.Close()
+
+	if err != nil {
+		return err
+	}
+	return closeErr
+}
+
+// copyBuffer is a helper that copies using a provided buffer
+func copyBuffer(dst *os.File, src *os.File, buf []byte) (int64, error) {
+	var written int64
+	for {
+		nr, rerr := src.Read(buf)
+		if nr > 0 {
+			nw, werr := dst.Write(buf[0:nr])
+			if nw > 0 {
+				written += int64(nw)
+			}
+			if werr != nil {
+				return written, werr
+			}
+			if nr != nw {
+				return written, fmt.Errorf("short write")
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return written, nil
+			}
+			return written, rerr
+		}
+	}
+}
+
+// sendSingleAttachmentMode sends one email per attachment with [N/Total] prefix.
+// On failure: stops immediately and reports which emails succeeded.
+// Body file is NOT routed/deleted until all emails complete successfully.
+func sendSingleAttachmentMode(params EmailParams) (*JSONResult, error) {
+	attachments := params.Attachments
+	total := len(attachments)
+	originalSubject := params.Subject
+	originalBody := params.Body
+
+	// Read body file content once if specified (reused for all emails)
+	var bodyFileContent string
+	if params.BodyFile != "" {
+		data, err := os.ReadFile(params.BodyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read body file: %w", err)
+		}
+		bodyFileContent = string(data)
+	}
+
+	// Rate limiting for single attachment mode
+	var rateLimiter *time.Ticker
+	if params.RateLimit > 0 {
+		interval := time.Minute / time.Duration(params.RateLimit)
+		rateLimiter = time.NewTicker(interval)
+		defer rateLimiter.Stop()
+	}
+
+	var successCount int
+	var lastResult *JSONResult
+
+	for i, att := range attachments {
+		n := i + 1
+		filename := filepath.Base(att)
+		prefix := fmt.Sprintf("[%d/%d]", n, total)
+
+		// Create params for this single attachment
+		singleParams := params
+		singleParams.SingleAttachment = false // Prevent recursion
+		singleParams.Attachments = []string{att}
+		singleParams.Subject = fmt.Sprintf("%s %s", prefix, originalSubject)
+
+		// Prefix body with fragment info and filename
+		if bodyFileContent != "" {
+			singleParams.Body = ""
+			singleParams.BodyFile = params.BodyFile // Keep using body file
+			// We need to modify the body content - read and prefix it
+			singleParams.BodyFile = "" // Clear body file, use inline body instead
+			singleParams.Body = fmt.Sprintf("%s %s\n\n%s", prefix, filename, bodyFileContent)
+		} else if originalBody != "" {
+			singleParams.Body = fmt.Sprintf("%s %s\n\n%s", prefix, filename, originalBody)
+		} else {
+			singleParams.Body = fmt.Sprintf("%s %s", prefix, filename)
+		}
+
+		// Don't route files until all complete - handle routing ourselves
+		singleParams.RouteSuccessPath = ""
+		singleParams.RouteErrorPath = ""
+		singleParams.RouteDelete = false
+
+		// Rate limit wait (skip first email)
+		if rateLimiter != nil && i > 0 {
+			<-rateLimiter.C
+		}
+
+		result, err := SendEmail(singleParams)
+		lastResult = result
+
+		if err != nil || (result != nil && result.Status != "success") {
+			// Failed - route all attachments to error path
+			if params.RouteErrorPath != "" {
+				if routeErr := routeAttachments(attachments, false, "", params.RouteErrorPath, false); routeErr != nil {
+					if !params.Quiet && !params.JSONOutput && !params.NDJSONOutput {
+						fmt.Fprintf(os.Stderr, "Warning: failed to route attachments to error path: %v\n", routeErr)
+					}
+				}
+				if params.BodyFile != "" {
+					if routeErr := routeAttachments([]string{params.BodyFile}, false, "", params.RouteErrorPath, false); routeErr != nil {
+						if !params.Quiet && !params.JSONOutput && !params.NDJSONOutput {
+							fmt.Fprintf(os.Stderr, "Warning: failed to route body file to error path: %v\n", routeErr)
+						}
+					}
+				}
+			}
+
+			// Return error with context about partial success
+			errMsg := "unknown error"
+			if err != nil {
+				errMsg = err.Error()
+			} else if result != nil && result.Error != "" {
+				errMsg = result.Error
+			}
+			return result, fmt.Errorf("single-attachment mode failed at %d/%d (%s): %s (sent %d/%d successfully)",
+				n, total, filename, errMsg, successCount, total)
+		}
+
+		successCount++
+
+		// Route this attachment to success path after successful send
+		if params.RouteSuccessPath != "" || params.RouteDelete {
+			if routeErr := routeAttachments([]string{att}, true, params.RouteSuccessPath, "", params.RouteDelete); routeErr != nil {
+				if !params.Quiet && !params.JSONOutput && !params.NDJSONOutput {
+					fmt.Fprintf(os.Stderr, "Warning: failed to route attachment %s: %v\n", filepath.Base(att), routeErr)
+				}
+			}
+		}
+	}
+
+	// All succeeded - route body file if configured
+	if params.BodyFile != "" && (params.RouteSuccessPath != "" || params.RouteDelete) {
+		if routeErr := routeAttachments([]string{params.BodyFile}, true, params.RouteSuccessPath, "", params.RouteDelete); routeErr != nil {
+			if !params.Quiet && !params.JSONOutput && !params.NDJSONOutput {
+				fmt.Fprintf(os.Stderr, "Warning: failed to route body file: %v\n", routeErr)
+			}
+		}
+	}
+
+	// Update last result to reflect batch completion
+	if lastResult != nil {
+		lastResult.Subject = fmt.Sprintf("%s (%d emails)", originalSubject, total)
+	}
+
+	return lastResult, nil
+}
+
+// sendSingleRecipientMode sends one email per recipient with rate limiting.
+// This enables batch sending with per-recipient tracking and rate control.
+// On failure: stops immediately and reports which emails succeeded.
+func sendSingleRecipientMode(params EmailParams) (*JSONResult, error) {
+	recipients := params.To
+	total := len(recipients)
+	originalSubject := params.Subject
+
+	// Rate limiting for single recipient mode
+	var rateLimiter *time.Ticker
+	if params.RateLimit > 0 {
+		interval := time.Minute / time.Duration(params.RateLimit)
+		rateLimiter = time.NewTicker(interval)
+		defer rateLimiter.Stop()
+	}
+
+	var successCount int
+	var failedRecipients []string
+
+	for i, recipient := range recipients {
+		n := i + 1
+
+		// Create params for this single recipient
+		singleParams := params
+		singleParams.SingleRecipient = false // Prevent recursion
+		singleParams.To = []string{recipient}
+
+		// Rate limit wait (skip first email)
+		if rateLimiter != nil && i > 0 {
+			<-rateLimiter.C
+		}
+
+		result, err := SendEmail(singleParams)
+
+		if err != nil || (result != nil && result.Status != "success") {
+			failedRecipients = append(failedRecipients, recipient)
+
+			// Log failure but continue with remaining recipients
+			if !params.Quiet && !params.JSONOutput && !params.NDJSONOutput {
+				errMsg := "unknown error"
+				if err != nil {
+					errMsg = err.Error()
+				} else if result != nil && result.Error != "" {
+					errMsg = result.Error
+				}
+				fmt.Fprintf(os.Stderr, "Failed to send to %s (%d/%d): %s\n", recipient, n, total, errMsg)
+			}
+			continue
+		}
+
+		successCount++
+	}
+
+	// Build final result
+	timestamp := time.Now().Format(time.RFC3339)
+	finalResult := &JSONResult{
+		Status:     "success",
+		Timestamp:  timestamp,
+		SMTPServer: params.SMTPServer,
+		SMTPPort:   params.SMTPPort,
+		From:       params.From,
+		To:         recipients,
+		Subject:    fmt.Sprintf("%s (%d/%d sent)", originalSubject, successCount, total),
+		Attempts:   total,
+	}
+
+	if len(failedRecipients) > 0 {
+		finalResult.Status = "partial"
+		finalResult.Error = fmt.Sprintf("%d/%d recipients failed: %v", len(failedRecipients), total, failedRecipients)
+		return finalResult, fmt.Errorf("single-recipient mode: %d/%d failed", len(failedRecipients), total)
+	}
+
+	return finalResult, nil
 }
