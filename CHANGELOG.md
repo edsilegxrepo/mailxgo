@@ -18,8 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added `--tls-ca-dir` flag to load CA certificates from directory (`.pem`, `.crt`, `.cer` files).
   - Added `--tls-fingerprint` flag for SHA256 certificate fingerprint pinning.
   - Added `ignore-trust` TLS mode for self-signed certificates on internal relays.
+  - Added `tls-direct` TLS mode for implicit TLS (SMTPS-style) on any port, bypassing STARTTLS negotiation.
 - **Secretprotector Integration**: Added AES-256-GCM encrypted credential support via `v1:gcm:` prefix with `SECRETPROTECTOR_MASTER_KEY` environment variable.
 - **Live Diagnostics Tests**: Added `TestLive_RunDiagnostics` and `TestLive_OutputDiagReport` E2E tests against Mailpit SMTP server.
+- **STARTTLS Live Tests**: Added `TestLive_DiagnosticsSTARTTLS` E2E tests verifying TLS version, cipher suite, certificate info, and handshake latency.
+- **Implicit TLS Live Tests**: Added `TestLive_ImplicitTLS_Port465` E2E tests with SSL-only Mailpit container for SMTPS/port 465 behavior.
 - **Comprehensive Unit Tests**: Added tests for `BuildTLSConfig`, `noAuthSASL`, `ClassifyError`, and authentication modes (`noauth`, `xoauth2`, `cram-md5`).
 - **JSON List Format**: Added `--list-format` flag supporting `text` (default) and `json` formats for `--recipient-list` and `--attachments-list` files.
 - **Renamed Flag**: Renamed `--list` to `--recipient-list` for clarity and consistency with `--attachments-list`.
@@ -27,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Object array with per-recipient vars: `[{"email": "alice@example.com", "vars": {"name": "Alice"}}]`
 
 ### Changed
-- **Test Coverage**: Increased unit test coverage from 76.6% to 82.5%, integration test coverage to 86.7%.
+- **Test Coverage**: Increased unit test coverage from 76.6% to 82.5%, integration test coverage to 88.7%.
 
 ### Security
 - **TLS Session Resumption Security**: Added `VerifyConnection` callback to fingerprint pinning to ensure certificate verification runs on resumed TLS sessions, to avoid a potential TLS session resumption bypass.
