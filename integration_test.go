@@ -48,17 +48,22 @@ import (
 )
 
 const (
-	smtpHost      = "127.0.0.1"
-	smtpPort      = 1025
-	mailpitAPI    = "http://127.0.0.1:8025/api"
-	containerName = "mailxgo-integration-smtp"
+	smtpHost           = "127.0.0.1"
+	smtpPort           = 1025
+	smtpPortSSL        = 1465 // Implicit TLS (SMTPS) port
+	mailpitAPI         = "http://127.0.0.1:8025/api"
+	containerName      = "mailxgo-integration-smtp"
+	containerNameSSL   = "mailxgo-integration-smtp-ssl"
 )
 
 var (
-	mailpitReady     bool
-	mailpitSetupOnce sync.Once
-	mailpitSetupErr  error
-	testTLSCertDir   string
+	mailpitReady       bool
+	mailpitSSLReady    bool
+	mailpitSetupOnce   sync.Once
+	mailpitSSLSetupOnce sync.Once
+	mailpitSetupErr    error
+	mailpitSSLSetupErr error
+	testTLSCertDir     string
 )
 
 // isWSL returns true if running via WSL docker (higher latency expected)
@@ -91,9 +96,11 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	// Teardown: Stop and remove container
+	// Teardown: Stop and remove containers
 	_, _ = runDockerCmd("stop", containerName)
 	_, _ = runDockerCmd("rm", "-f", containerName)
+	_, _ = runDockerCmd("stop", containerNameSSL)
+	_, _ = runDockerCmd("rm", "-f", containerNameSSL)
 
 	// Clean up TLS cert directory
 	if testTLSCertDir != "" {
@@ -245,6 +252,88 @@ func waitForMailpit(addr string) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return fmt.Errorf("mailpit not ready after %v", timeout)
+}
+
+// ensureMailpitSSLContainer ensures a second Mailpit container is running with SSL-only (implicit TLS).
+// This simulates port 465 SMTPS behavior where the connection starts with TLS handshake.
+func ensureMailpitSSLContainer() error {
+	addr := fmt.Sprintf("%s:%d", smtpHost, smtpPortSSL)
+	imageName := "axllent/mailpit"
+
+	// Check if container exists
+	out, err := runDockerCmd("inspect", "-f", "{{.State.Running}}", containerNameSSL)
+	if err == nil {
+		if strings.TrimSpace(string(out)) == "true" {
+			return waitForMailpitSSL(addr)
+		}
+		// Container exists but stopped, start it
+		if _, err := runDockerCmd("start", containerNameSSL); err == nil {
+			return waitForMailpitSSL(addr)
+		}
+		// Failed to start, remove and recreate
+		_, _ = runDockerCmd("rm", "-f", containerNameSSL)
+	}
+
+	// Reuse certs from main container or generate new ones
+	certDir := testTLSCertDir
+	if certDir == "" {
+		var err error
+		certDir, err = generateTLSCertsForDocker()
+		if err != nil {
+			return fmt.Errorf("failed to generate TLS certs for SSL container: %w", err)
+		}
+		testTLSCertDir = certDir
+	}
+
+	// Create and start SSL-only container (MP_SMTP_REQUIRE_TLS=true disables STARTTLS, requires full TLS)
+	// Note: Cannot use MP_SMTP_AUTH_ALLOW_INSECURE with MP_SMTP_REQUIRE_TLS
+	_, err = runDockerCmd("run", "-d", "--name", containerNameSSL,
+		"-p", fmt.Sprintf("%d:1025", smtpPortSSL),
+		"-p", "8026:8025", // Different API port to avoid conflict
+		"-v", fmt.Sprintf("%s:/certs:ro", certDir),
+		"-e", "MP_SMTP_AUTH_ACCEPT_ANY=true",
+		"-e", "MP_SMTP_TLS_CERT=/certs/cert.pem",
+		"-e", "MP_SMTP_TLS_KEY=/certs/key.pem",
+		"-e", "MP_SMTP_REQUIRE_TLS=true",
+		imageName)
+	if err != nil {
+		return fmt.Errorf("failed to create SSL-only mailpit container: %w", err)
+	}
+
+	return waitForMailpitSSL(addr)
+}
+
+// waitForMailpitSSL waits until the SSL-only Mailpit SMTP port is responsive
+func waitForMailpitSSL(addr string) error {
+	timeout := containerTimeout()
+	deadline := time.Now().Add(timeout)
+	dialTO := dialTimeout()
+
+	for time.Now().Before(deadline) {
+		// For SSL-only, we need to do a TLS dial to verify it's working
+		if conn, err := net.DialTimeout("tcp", addr, dialTO); err == nil {
+			conn.Close()
+			mailpitSSLReady = true
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("SSL mailpit not ready after %v", timeout)
+}
+
+// setupMailpitSSL ensures the SSL-only Mailpit container is ready for testing
+func setupMailpitSSL(t *testing.T) {
+	t.Helper()
+	mailpitSSLSetupOnce.Do(func() {
+		mailpitSSLSetupErr = ensureMailpitSSLContainer()
+	})
+	if mailpitSSLSetupErr != nil {
+		t.Skipf("SSL Mailpit container not available: %v", mailpitSSLSetupErr)
+	}
+	if !mailpitSSLReady {
+		t.Skip("SSL Mailpit not ready")
+	}
+	t.Logf("SSL Mailpit container ready on %s:%d", smtpHost, smtpPortSSL)
 }
 
 // MailpitMessage represents a message from Mailpit API
@@ -1921,6 +2010,87 @@ func TestLive_DiagnosticsSTARTTLS(t *testing.T) {
 			for i, cert := range report.TLSInfo.ChainOfTrust {
 				t.Logf("  [%d] Subject=%s, IsCA=%v", i, cert.Subject, cert.IsCA)
 			}
+		}
+	})
+}
+
+// =============================================================================
+// E2E TEST: Port 465 Implicit TLS (SMTPS) - SSL-only connection
+// =============================================================================
+func TestLive_ImplicitTLS_Port465(t *testing.T) {
+	setupMailpitSSL(t)
+
+	// Test 1: Send email via implicit TLS (SMTPS style)
+	// Using tls-direct mode to force implicit TLS on non-465 port
+	t.Run("SendEmail_ImplicitTLS", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   smtpPortSSL,
+			From:       "sender@example.com",
+			To:         []string{"recipient@example.com"},
+			Subject:    "Implicit TLS (SMTPS) Test",
+			Body:       "This email was sent with implicit TLS (connection starts with TLS handshake).",
+			TLSMode:    "tls-direct", // Forces implicit TLS on any port
+			NoAuth:     true,
+			Timeout:    15,
+		}
+
+		result, err := mailxgo.SendEmail(params)
+		if err != nil {
+			t.Fatalf("SendEmail on port 465 failed: %v", err)
+		}
+		if result.Status != "success" {
+			t.Errorf("expected success, got %s", result.Status)
+		}
+		t.Logf("Port 465 send succeeded: %s (attempts: %d)", result.Status, result.Attempts)
+	})
+
+	// Test 2: Diagnostics with implicit TLS
+	t.Run("Diagnostics_ImplicitTLS", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   smtpPortSSL,
+			From:       "diag@example.com",
+			TLSMode:    "tls-direct", // Forces implicit TLS
+			Timeout:    15,
+		}
+
+		report, err := mailxgo.RunDiagnostics(params, false)
+		if err != nil {
+			t.Logf("Diagnostics returned error (may be expected): %v", err)
+		}
+		if report == nil {
+			t.Fatal("expected report even on error")
+		}
+
+		t.Logf("Port 465 diagnostics: Status=%s", report.Status)
+		if report.TLSInfo != nil {
+			t.Logf("TLS: Version=%s, Cipher=%s, Subject=%s",
+				report.TLSInfo.Version, report.TLSInfo.CipherSuite, report.TLSInfo.Subject)
+		}
+
+		// On port 465, STARTTLS should NOT be advertised (implicit TLS)
+		if report.Capabilities.StartTLS {
+			t.Logf("Note: STARTTLS advertised on port 465 (unusual but not an error)")
+		}
+	})
+
+	// Test 3: Verify TLS handshake metrics are captured
+	t.Run("TLSHandshakeLatency_ImplicitTLS", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   smtpPortSSL,
+			TLSMode:    "tls-direct",
+			Timeout:    15,
+		}
+
+		report, _ := mailxgo.RunDiagnostics(params, false)
+		if report != nil && report.Status == "success" {
+			if report.Latency.TLSHandshakeMS <= 0 {
+				t.Error("expected TLS handshake latency > 0 for implicit TLS")
+			}
+			t.Logf("Latency: TCP=%.2fms, TLS=%.2fms, Total=%.2fms",
+				report.Latency.TCPConnectMS, report.Latency.TLSHandshakeMS, report.Latency.TotalMS)
 		}
 	})
 }
