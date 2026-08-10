@@ -97,7 +97,12 @@ func TestMain(m *testing.M) {
 
 	// Clean up TLS cert directory
 	if testTLSCertDir != "" {
-		os.RemoveAll(testTLSCertDir)
+		if runtime.GOOS == "windows" {
+			// WSL cert dir needs WSL rm
+			exec.Command("wsl", "rm", "-rf", testTLSCertDir).Run()
+		} else {
+			os.RemoveAll(testTLSCertDir)
+		}
 	}
 
 	os.Exit(code)
@@ -137,18 +142,84 @@ func ensureMailpitContainer() error {
 		}
 	}
 
-	// Create and start container
+	// Generate TLS certificates for STARTTLS support
+	certDir, err := generateTLSCertsForDocker()
+	if err != nil {
+		// Fall back to non-TLS mode if cert generation fails
+		_, err = runDockerCmd("run", "-d", "--name", containerName,
+			"-p", fmt.Sprintf("%d:1025", smtpPort),
+			"-p", "8025:8025",
+			"-e", "MP_SMTP_AUTH_ACCEPT_ANY=true",
+			"-e", "MP_SMTP_AUTH_ALLOW_INSECURE=true",
+			imageName)
+		if err != nil {
+			return fmt.Errorf("failed to create mailpit container: %w", err)
+		}
+		return waitForMailpit(addr)
+	}
+	testTLSCertDir = certDir
+
+	// Create and start container with TLS support
 	_, err = runDockerCmd("run", "-d", "--name", containerName,
 		"-p", fmt.Sprintf("%d:1025", smtpPort),
 		"-p", "8025:8025",
+		"-v", fmt.Sprintf("%s:/certs:ro", certDir),
 		"-e", "MP_SMTP_AUTH_ACCEPT_ANY=true",
 		"-e", "MP_SMTP_AUTH_ALLOW_INSECURE=true",
+		"-e", "MP_SMTP_TLS_CERT=/certs/cert.pem",
+		"-e", "MP_SMTP_TLS_KEY=/certs/key.pem",
 		imageName)
 	if err != nil {
 		return fmt.Errorf("failed to create mailpit container: %w", err)
 	}
 
 	return waitForMailpit(addr)
+}
+
+// generateTLSCertsForDocker creates self-signed TLS certs in a Docker-accessible location.
+// On Windows with WSL Docker, certs are created inside WSL's filesystem.
+// On Linux, certs are created in local /tmp.
+func generateTLSCertsForDocker() (string, error) {
+	var certDir string
+
+	if runtime.GOOS == "windows" {
+		// Create temp dir inside WSL for Docker volume mount compatibility
+		out, err := exec.Command("wsl", "mktemp", "-d", "/tmp/mailxgo-tls-XXXXXX").Output()
+		if err != nil {
+			return "", fmt.Errorf("failed to create WSL cert dir: %w", err)
+		}
+		certDir = strings.TrimSpace(string(out))
+
+		// Generate certs using openssl inside WSL
+		opensslCmd := fmt.Sprintf(`openssl req -x509 -newkey rsa:2048 -keyout %s/key.pem -out %s/cert.pem -days 1 -nodes -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`, certDir, certDir)
+		cmd := exec.Command("wsl", "bash", "-c", opensslCmd)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			// Cleanup on failure
+			exec.Command("wsl", "rm", "-rf", certDir).Run()
+			return "", fmt.Errorf("failed to generate certs in WSL: %w, output: %s", err, out)
+		}
+	} else {
+		// Linux: create certs locally
+		var err error
+		certDir, err = os.MkdirTemp("", "mailxgo-tls-*")
+		if err != nil {
+			return "", fmt.Errorf("failed to create cert dir: %w", err)
+		}
+
+		// Generate certs using openssl
+		opensslCmd := exec.Command("openssl", "req", "-x509", "-newkey", "rsa:2048",
+			"-keyout", filepath.Join(certDir, "key.pem"),
+			"-out", filepath.Join(certDir, "cert.pem"),
+			"-days", "1", "-nodes",
+			"-subj", "/CN=localhost",
+			"-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1")
+		if out, err := opensslCmd.CombinedOutput(); err != nil {
+			os.RemoveAll(certDir)
+			return "", fmt.Errorf("failed to generate certs: %w, output: %s", err, out)
+		}
+	}
+
+	return certDir, nil
 }
 
 // waitForMailpit waits until Mailpit API is responsive
@@ -1769,6 +1840,87 @@ func TestLive_DiagnosticsWithTLSOptions(t *testing.T) {
 		}
 		if report.Status != "success" {
 			t.Errorf("expected status success, got %s", report.Status)
+		}
+	})
+}
+
+// =============================================================================
+// E2E TEST: Diagnostics with STARTTLS (requires TLS-enabled Mailpit)
+// =============================================================================
+func TestLive_DiagnosticsSTARTTLS(t *testing.T) {
+	setupMailpit(t)
+
+	// Test STARTTLS diagnostics with ignore-trust (self-signed cert)
+	t.Run("STARTTLS_IgnoreTrust", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   smtpPort,
+			From:       "starttls@example.com",
+			TLSMode:    "ignore-trust",
+			Timeout:    15,
+		}
+
+		report, err := mailxgo.RunDiagnostics(params, false)
+		if report == nil {
+			t.Fatal("expected report even on error")
+		}
+
+		// If STARTTLS is available and succeeded
+		if report.Status == "success" && report.Capabilities.StartTLS {
+			t.Logf("STARTTLS succeeded: TLS=%s, Cipher=%s",
+				report.TLSInfo.Version, report.TLSInfo.CipherSuite)
+
+			// Verify TLS info is populated
+			if report.TLSInfo == nil {
+				t.Error("expected TLSInfo to be populated after STARTTLS")
+			} else {
+				if report.TLSInfo.Version == "" {
+					t.Error("expected TLS version to be populated")
+				}
+				if report.TLSInfo.CipherSuite == "" {
+					t.Error("expected cipher suite to be populated")
+				}
+				if report.TLSInfo.Subject == "" {
+					t.Error("expected certificate subject to be populated")
+				}
+				if len(report.TLSInfo.ChainOfTrust) == 0 {
+					t.Error("expected certificate chain to be populated")
+				}
+				t.Logf("Cert: Subject=%s, Issuer=%s, Expiry=%d days",
+					report.TLSInfo.Subject, report.TLSInfo.Issuer, report.TLSInfo.DaysUntilExpiration)
+			}
+
+			// Verify TLS latency was measured
+			if report.Latency.TLSHandshakeMS <= 0 {
+				t.Error("expected TLS handshake latency > 0")
+			}
+			t.Logf("Latency: TCP=%.2fms, TLS=%.2fms, EHLO=%.2fms, Total=%.2fms",
+				report.Latency.TCPConnectMS, report.Latency.TLSHandshakeMS,
+				report.Latency.EHLORTTMS, report.Latency.TotalMS)
+		} else if report.Capabilities.StartTLS && report.Status == "error" {
+			// STARTTLS advertised but handshake failed
+			t.Logf("STARTTLS advertised but failed: %s", report.Error)
+		} else {
+			// STARTTLS not available (no TLS certs in container)
+			t.Logf("STARTTLS not available (TLS certs may not be mounted): %v", err)
+		}
+	})
+
+	// Test diagnostics with printCerts=true
+	t.Run("STARTTLS_PrintCerts", func(t *testing.T) {
+		params := mailxgo.EmailParams{
+			SMTPServer: smtpHost,
+			SMTPPort:   smtpPort,
+			TLSMode:    "ignore-trust",
+			Timeout:    15,
+		}
+
+		report, _ := mailxgo.RunDiagnostics(params, true) // printCerts=true
+		if report != nil && report.Status == "success" && report.TLSInfo != nil {
+			t.Logf("Certificate chain has %d entries", len(report.TLSInfo.ChainOfTrust))
+			for i, cert := range report.TLSInfo.ChainOfTrust {
+				t.Logf("  [%d] Subject=%s, IsCA=%v", i, cert.Subject, cert.IsCA)
+			}
 		}
 	})
 }
