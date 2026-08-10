@@ -150,6 +150,8 @@ sequenceDiagram
 | **Integration** | `TestLive_TLSFingerprintValidation` | E2E test of fingerprint format validation. | PASS on valid fingerprints; error on invalid format. |
 | **Integration** | `TestLive_DiagnosticsWithTLSOptions` | E2E test of diagnostics with TLS options. | PASS on diagnostics with `ignore-trust` and CA cert. |
 | **Integration** | `TestLive_CLI_TLSOptions` | E2E test of CLI with TLS config options. | PASS on CLI send with TLS mode in config file. |
+| **Integration** | `TestLive_DiagnosticsSTARTTLS` | E2E test of STARTTLS TLS upgrade with Mailpit. Subtests: STARTTLS_IgnoreTrust (verify TLS version, cipher, cert info), STARTTLS_PrintCerts (verify certificate chain output). | PASS on `status: success` with TLS 1.3, valid cipher suite, certificate subject/issuer, and TLS handshake latency > 0. |
+| **Integration** | `TestLive_ImplicitTLS_Port465` | E2E test of implicit TLS (SMTPS) with SSL-only Mailpit container. Subtests: SendEmail_ImplicitTLS (send via `tls-direct` mode), Diagnostics_ImplicitTLS (diagnostics with implicit TLS), TLSHandshakeLatency_ImplicitTLS (verify TLS metrics). | PASS on successful send/diagnostics with TLS 1.3, STARTTLS=false (implicit TLS), and TLS handshake latency > 0. |
 | **OAuth2** | `TestLive_OAuth2_XOAUTH2Authentication` | E2E test of XOAUTH2 authentication via OAuth2 mock server. Subtests: XOAUTH2_ValidToken, XOAUTH2_TestToken, XOAUTH2_EncryptedToken, CLI_OAuth2. | PASS on successful XOAUTH2 auth with valid tokens, test tokens, encrypted tokens, and CLI flags. |
 | **Mailer Engine** | `TestSendEmail_MaxRecipients` | Tests `--max-recipients` limit guard for memory protection. | PASS on error when recipients exceed limit; success when within limit. |
 | **Mailer Engine** | `TestSendEmail_SingleRecipient` | Tests `--single-recipient` batch mode with rate limiting. | PASS on individual email per recipient with proper rate limiting. |
@@ -179,9 +181,9 @@ Statement coverage statistics measured across the workspace:
 | Package Path | Statement Coverage | Status ($\ge 80\%$) |
 | :--- | :--- | :--- |
 | `github.com/edsilegxrepo/mailxgo` (Unit Tests) | **82.5%** | PASS |
-| `github.com/edsilegxrepo/mailxgo` (With Integration Tag) | **86.7%** | PASS |
+| `github.com/edsilegxrepo/mailxgo` (With Integration Tag) | **88.7%** | PASS |
 | `github.com/edsilegxrepo/mailxgo/cmd/mailxgo` | Entry point only | N/A |
-| **Total Combined Workspace Coverage** | **86%+** | **PASS** |
+| **Total Combined Workspace Coverage** | **88%+** | **PASS** |
 
 ### 5.2 Refreshing Coverage Statistics
 To refresh and verify code coverage profile statistics locally:
@@ -210,9 +212,15 @@ go tool cover -html=coverage.out
 The integration test suite (`integration_test.go`) implements a dual-mode SMTP backend:
 
 ### 6.1 Mailpit Container Integration (Preferred)
-When Docker is available, the test suite automatically launches a **Mailpit** container (`axllent/mailpit`) providing:
+When Docker is available, the test suite automatically launches **Mailpit** containers (`axllent/mailpit`) providing:
 
-- **Full ESMTP Server:** Real RFC 5321 compliant SMTP server on port `1025`.
+- **STARTTLS SMTP Server (Port 1025):** Real RFC 5321 compliant SMTP server with STARTTLS support.
+  - TLS certificates auto-generated via OpenSSL (self-signed, localhost SAN).
+  - Supports explicit TLS upgrade via STARTTLS command.
+- **Implicit TLS SMTP Server (Port 1465):** SSL-only Mailpit container for SMTPS testing.
+  - Enabled via `MP_SMTP_REQUIRE_TLS=true` environment variable.
+  - Connection starts with immediate TLS handshake (no STARTTLS).
+  - Used for testing `--tls-mode tls-direct` and port 465 behavior.
 - **REST API Verification:** Tests use Mailpit's REST API (`http://127.0.0.1:8025/api/v1/`) to verify:
   - Message envelope (From, To, CC, BCC, ReplyTo)
   - Subject and body content (HTML/Text)

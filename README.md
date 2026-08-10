@@ -35,6 +35,7 @@
 ### 2.1 Encryption in Transit
 * **TLS Policy Modes (`--tls-mode`):**
   * `tls` (Default): Enforces TLS encryption with full certificate chain verification. Automatically uses implicit SMTPS TLS on port 465 (`mail.WithSSL()`) or explicit STARTTLS on ports 587/25 (`mail.TLSMandatory`).
+  * `tls-direct`: Forces implicit TLS (SMTPS-style) on any port. Connection starts with TLS handshake immediately, bypassing STARTTLS negotiation. Use for servers that require implicit TLS on non-standard ports. Skips certificate verification (self-signed certs accepted).
   * `ignore-trust`: Enforces TLS encryption while ignoring certificate chain of trust validation. Use for internal relays with self-signed or private CA certificates.
   * `none`: Disables TLS encryption (`mail.NoTLS`) for unencrypted internal SMTP relays.
 
