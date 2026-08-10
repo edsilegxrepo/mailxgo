@@ -45,9 +45,9 @@
 
 ### 2.2 Secret Management
 * **Environment Variable Ingestion:** Prevents cleartext credentials from appearing in process listing tables (`ps aux` or Task Manager):
-  * Passwords: Reads `MAILXGO_SMTP_PASSWORD` $\rightarrow$ `MAIL2GO_SMTP_PASSWORD` $\rightarrow$ `SMTP_USER_PASS`.
-  * Usernames: Reads `MAILXGO_SMTP_USERNAME` $\rightarrow$ `MAIL2GO_SMTP_USERNAME` $\rightarrow$ `SMTP_USER`.
-  * OAuth Tokens: Reads `MAILXGO_OAUTH_TOKEN` $\rightarrow$ `MAIL2GO_OAUTH_TOKEN` $\rightarrow$ `SMTP_OAUTH_TOKEN`.
+  * Passwords: `MAILXGO_SMTP_PASSWORD`
+  * Usernames: `MAILXGO_SMTP_USERNAME`
+  * OAuth Tokens: `MAILXGO_OAUTH_TOKEN`
 
 * **Encrypted Credential Support (secretprotector):** Passwords and OAuth tokens with `v1:gcm:` prefix are automatically decrypted using AES-256-GCM via the secretprotector library:
   * Set the master key via `SECRETPROTECTOR_MASTER_KEY` environment variable.
@@ -65,13 +65,17 @@
 
 ### 2.4 Unprivileged Execution Context & Library Audit
 * **Execution Context:** `mailxgo` operates strictly in user-space (`uid/gid`) and requires no root or elevated system privileges.
-* **Dependency Inventory:** Built using native Go Standard Library modules (`net`, `crypto/tls`, `encoding/json`) and `github.com/wneessen/go-mail v0.4.0`. All dependencies are maintained, contain zero indirect third-party modules, and have no known security vulnerabilities.
+* **Dependency Inventory:** Built using native Go Standard Library modules (`net`, `crypto/tls`, `encoding/json`) and:
+  * `github.com/wneessen/go-mail v0.8.1` - SMTP client library (maintained, no CVEs)
+  * `github.com/klauspost/compress` - zstd compression for EML archiving (industry standard)
+  * `github.com/zeebo/xxh3` - xxh3-128 hashing for archive filenames (fast, well-maintained)
+  * `github.com/edsilegxrepo/secretprotector` - AES-256-GCM secret decryption (requires `SECRETPROTECTOR_MASTER_KEY` environment variable for encrypted credentials with `v1:gcm:` prefix)
 
 ---
 
 ## 3. Code Quality & Architecture Best Practices
 
-* **Granular Exit Codes:** Replaces generic exit codes with granular status codes (`ExitSuccess = 0`, `ExitErrUsage = 2`, `ExitErrConfig = 3`, `ExitErrFileIO = 4`, `ExitErrDNS = 5`, `ExitErrTLS = 6`, `ExitErrAuth = 7`, `ExitErrSend = 8`).
+* **Granular Exit Codes:** Replaces generic exit codes with granular status codes (`ExitSuccess = 0`, `ExitErrUsage = 2`, `ExitErrConfig = 3`, `ExitErrFileIO = 4`, `ExitErrDNS = 5`, `ExitErrTLS = 6`, `ExitErrAuth = 7`, `ExitErrSend = 8`, `ExitErrConnection = 9`).
 * **Cross-Platform CRLF Compatibility:** Employs `bufio.Scanner` with line trimming across all list file parsers in `util.go`, preventing trailing carriage return (`\r`) file path or email address corruption on Windows environments.
 * **MIME Header Injection Mitigation:** Custom MIME header keys and values are sanitized to reject control characters (`\r`, `\n`) in accordance with RFC 5322.
 * **Pre-Dial Payload Bounds Protection:** Evaluates total attachment sizes prior to opening network sockets, preventing resource consumption if payloads exceed maximum size thresholds (`--max-attachment-size`).
@@ -102,27 +106,43 @@
 | `--to-email` | String | `""` | Recipient email addresses (comma-separated) |
 | `--cc` | String | `""` | Carbon Copy (CC) email addresses (comma-separated) |
 | `--bcc` | String | `""` | Blind Carbon Copy (BCC) email addresses (comma-separated) |
-| `--list` | String | `""` | Path to file containing recipient email addresses (one per line) |
+| `--recipient-list` | String | `""` | Path to file containing recipient email addresses |
+| `--list-format` | String | `"text"` | Format for --recipient-list and --attachments-list: text or json |
 | `--reply-to` | String | `""` | Reply-To email address |
 | `--subject` | String | `""` | Email subject line |
 | `--body` | String | `""` | Plaintext email body content |
 | `--body-file` | String | `""` | Path to file containing HTML email body content |
+| `--template` | String | `""` | Path to Go template file for body |
+| `--template-data` | String | `""` | Path to JSON file with template variables |
+| `--var` | String | `""` | Template variable in `Name: Value` format (repeatable) |
 | `--attachments` | String | `""` | Attachment file paths (comma-separated) |
-| `--attachments-list` | String | `""` | Path to file containing attachment file paths (one per line) |
+| `--attachments-list` | String | `""` | Path to file containing attachment file paths |
 | `--attachments-dir` | String | `""` | Path to directory whose regular file contents will be attached |
 | `--max-attachment-size` | Integer | `0` | Maximum combined attachment size limit in MB (0 = disabled) |
+| `--single-attachment` | Boolean | `false` | Send one email per attachment with [N/Total] prefix |
 | `--inline-attachments` | String | `""` | File paths for inline embedded images (comma-separated) |
+| `--route` | String | `""` | Move body file/attachments after send: `successPath,errorPath` |
+| `--delete` | Boolean | `false` | Delete body file/attachments after successful send |
 | `--header` | String | `""` | Custom MIME header in `Header-Name: Value` format (repeatable) |
 | `--log-file` | String | `""` | File path to append execution audit logs |
 | `--no-log-recipients` | Boolean | `false` | Redact recipient addresses in log files (GDPR/privacy) |
 | `--retries` | Integer | `0` | Retries on network socket dial failure |
 | `--retry-delay` | Integer | `5` | Delay in seconds between dial retries |
 | `--timeout` | Integer | `30` | Socket connection timeout in seconds |
+| `--delay` | Integer | `0` | Delay in seconds before sending |
+| `--rate-limit` | Integer | `0` | Max emails per minute (for batch/multi-recipient) |
+| `--max-recipients` | Integer | `1000` | Maximum recipients per email (memory protection) |
+| `--single-recipient` | Boolean | `false` | Send one email per recipient with rate limiting |
 | `--dsn-notify` | String | `""` | DSN notification options (SUCCESS, FAILURE, DELAY, NEVER) |
 | `--dsn-return` | String | `""` | DSN return option (FULL, HDRS) |
 | `--importance` | String | `""` | Priority level (high, normal, low) |
+| `--dry-run` | Boolean | `false` | Validate config and connect but don't send |
+| `--read-receipt` | Boolean | `false` | Request read receipt (Disposition-Notification-To header) |
 | `--json-output` | Boolean | `false` | Output results in formatted JSON |
 | `--ndjson-output`, `--ndjson` | Boolean | `false` | Output results in single-line NDJSON format |
+| `--quiet`, `-q` | Boolean | `false` | Suppress output except errors |
+| `--save-eml` | String | `""` | Directory to save .eml archive after successful send |
+| `--compress` | Boolean | `false` | Compress .eml archive with zstd |
 | `--diag`, `--info` | Boolean | `false` | Execute pre-flight gateway diagnostics probe and exit |
 | `--print-certs` | Boolean | `false` | Display full TLS certificate chain during diagnostics |
 | `--debug` | Boolean | `false` | Enable protocol wire debug logging |
@@ -181,7 +201,7 @@ mailxgo \
   --from-email mft-service@company.com \
   --from-name "MFT System Scheduler" \
   --to-email operator@company.com \
-  --list /etc/mailxgo/recipients.txt \
+  --recipient-list /etc/mailxgo/recipients.txt \
   --subject "Daily Audit Report" \
   --body-file /var/reports/daily_audit.html \
   --attachments /var/reports/summary.pdf \

@@ -95,34 +95,52 @@ func PrintUsage() {
 	fmt.Fprintln(os.Stderr, "  --to-email                Recipient email addresses, comma-separated")
 	fmt.Fprintln(os.Stderr, "  --cc                      CC recipient email addresses, comma-separated")
 	fmt.Fprintln(os.Stderr, "  --bcc                     BCC recipient email addresses, comma-separated")
-	fmt.Fprintln(os.Stderr, "  --list                    File path containing recipient addresses, one per line")
+	fmt.Fprintln(os.Stderr, "  --recipient-list          File path containing recipient addresses")
 	fmt.Fprintln(os.Stderr, "  --reply-to                Reply-To email address")
 	fmt.Fprintln(os.Stderr, "  --subject                 Email subject line")
 	fmt.Fprintln(os.Stderr, "  --body                    Email body text")
 	fmt.Fprintln(os.Stderr, "  --body-file               File path for HTML email body")
+	fmt.Fprintln(os.Stderr, "  --template                Path to Go template file for body")
+	fmt.Fprintln(os.Stderr, "  --template-data           Path to JSON file with template variables")
+	fmt.Fprintln(os.Stderr, "  --var                     Template variable 'Name: Value' (repeatable)")
 	fmt.Fprintln(os.Stderr, "  --charset                 Body character set (Default: UTF-8)")
 	fmt.Fprintln(os.Stderr, "  --importance              Email priority: high, normal, low")
 	fmt.Fprintln(os.Stderr, "  --header                  Custom MIME header 'Name: Value' (repeatable)")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Attachments:")
 	fmt.Fprintln(os.Stderr, "  --attachments             File paths for attachments, comma-separated")
-	fmt.Fprintln(os.Stderr, "  --attachments-list        File containing attachment paths, one per line")
+	fmt.Fprintln(os.Stderr, "  --attachments-list        File containing attachment paths")
 	fmt.Fprintln(os.Stderr, "  --attachments-dir         Directory to attach all files from")
+	fmt.Fprintln(os.Stderr, "  --list-format             Format for --recipient-list and --attachments-list: text (default) or json")
 	fmt.Fprintln(os.Stderr, "  --inline-attachments      File paths for inline attachments, comma-separated")
 	fmt.Fprintln(os.Stderr, "  --max-attachment-size     Maximum total attachment size in MB")
+	fmt.Fprintln(os.Stderr, "  --single-attachment       Send one email per attachment with [N/Total] prefix")
+	fmt.Fprintln(os.Stderr, "  --route                   Move body file/attachments after send: 'successPath,errorPath'")
+	fmt.Fprintln(os.Stderr, "  --delete                  Delete body file/attachments after successful send")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Archiving:")
+	fmt.Fprintln(os.Stderr, "  --save-eml                Directory to save .eml archive after successful send")
+	fmt.Fprintln(os.Stderr, "  --compress                Compress .eml archive with zstd")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Delivery:")
 	fmt.Fprintln(os.Stderr, "  --retries                 Number of retries on SMTP failure (Default: 0)")
 	fmt.Fprintln(os.Stderr, "  --retry-delay             Delay between retries in seconds (Default: 5)")
 	fmt.Fprintln(os.Stderr, "  --timeout                 Connection timeout in seconds (Default: 30)")
+	fmt.Fprintln(os.Stderr, "  --delay                   Delay in seconds before sending")
+	fmt.Fprintln(os.Stderr, "  --rate-limit              Max emails per minute (for batch/multi-recipient)")
+	fmt.Fprintln(os.Stderr, "  --max-recipients          Maximum recipients per email (Default: 1000)")
+	fmt.Fprintln(os.Stderr, "  --single-recipient        Send one email per recipient with rate limiting")
 	fmt.Fprintln(os.Stderr, "  --dsn-notify              DSN notification: SUCCESS, FAILURE, DELAY, NEVER")
 	fmt.Fprintln(os.Stderr, "  --dsn-return              DSN return: FULL or HDRS")
+	fmt.Fprintln(os.Stderr, "  --dry-run                 Validate config and connect but don't send")
+	fmt.Fprintln(os.Stderr, "  --read-receipt            Request read receipt (Disposition-Notification-To)")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Output:")
 	fmt.Fprintln(os.Stderr, "  --json-output             Output result in JSON format")
 	fmt.Fprintln(os.Stderr, "  --ndjson-output           Output result in single-line NDJSON format")
 	fmt.Fprintln(os.Stderr, "  --log-file                File path to append execution logs")
 	fmt.Fprintln(os.Stderr, "  --no-log-recipients       Redact recipient addresses in logs (GDPR/privacy)")
+	fmt.Fprintln(os.Stderr, "  --quiet, -q               Suppress output except errors")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Diagnostics:")
 	fmt.Fprintln(os.Stderr, "  --diag                    Run pre-flight SMTP gateway diagnostics")
@@ -199,6 +217,24 @@ func RunCLI(args []string) {
 
 		showVersion bool
 		noAuth      bool
+		dryRun      bool
+		quiet       bool
+		readReceipt bool
+
+		// New features: template, delay, rate limit, archive, attachment routing
+		templateFile     string
+		templateDataFile string
+		templateVars     = make(HeaderFlags) // Reuse HeaderFlags for --var Name=Value
+		delay            int
+		rateLimit        int
+		maxRecipients    int
+		saveEMLPath      string
+		compressEML      bool
+		routePath        string // format: "successPath,errorPath"
+		routeDelete      bool
+		singleAttachment bool
+		singleRecipient  bool
+		listFormat       string // "text" (default) or "json"
 	)
 
 	// Long-form flags
@@ -226,7 +262,7 @@ func RunCLI(args []string) {
 	fs.StringVar(&toEmail, "to-email", "", "Email addresses that will receive the email, comma-separated")
 	fs.StringVar(&ccEmail, "cc", "", "CC recipient email addresses, comma-separated")
 	fs.StringVar(&bccEmail, "bcc", "", "BCC recipient email addresses, comma-separated")
-	fs.StringVar(&listFile, "list", "", "File path containing recipient email addresses (one per line)")
+	fs.StringVar(&listFile, "recipient-list", "", "File path containing recipient email addresses")
 	fs.StringVar(&replyTo, "reply-to", "", "Email address to reply to")
 
 	fs.StringVar(&subject, "subject", "", "Subject of the email")
@@ -261,6 +297,34 @@ func RunCLI(args []string) {
 	fs.BoolVar(&debug, "debug", false, "Enable verbose SMTP protocol wire debug tracing")
 
 	fs.Var(&headers, "header", "Custom MIME header in 'Header-Name: Value' format (can be specified multiple times)")
+
+	fs.BoolVar(&dryRun, "dry-run", false, "Validate config and connect but don't send")
+	fs.BoolVar(&quiet, "quiet", false, "Suppress output except errors")
+	fs.BoolVar(&quiet, "q", false, "Suppress output except errors")
+	fs.BoolVar(&readReceipt, "read-receipt", false, "Request read receipt (Disposition-Notification-To)")
+
+	// Template options
+	fs.StringVar(&templateFile, "template", "", "Path to Go template file for body")
+	fs.StringVar(&templateDataFile, "template-data", "", "Path to JSON file with template variables")
+	fs.Var(&templateVars, "var", "Template variable in 'Name: Value' format (repeatable)")
+
+	// Delivery timing
+	fs.IntVar(&delay, "delay", 0, "Delay in seconds before sending")
+	fs.IntVar(&rateLimit, "rate-limit", 0, "Max emails per minute (for batch/multi-recipient)")
+	fs.IntVar(&maxRecipients, "max-recipients", 0, "Maximum recipients per email (default 1000)")
+	fs.BoolVar(&singleRecipient, "single-recipient", false, "Send one email per recipient with rate limiting")
+
+	// Archiving
+	fs.StringVar(&saveEMLPath, "save-eml", "", "Directory to save .eml archive after successful send")
+	fs.BoolVar(&compressEML, "compress", false, "Compress .eml archive with zstd")
+
+	// File routing (body file + attachments)
+	fs.StringVar(&routePath, "route", "", "Move body file/attachments after send: 'successPath,errorPath'")
+	fs.BoolVar(&routeDelete, "delete", false, "Delete body file/attachments after successful send")
+	fs.BoolVar(&singleAttachment, "single-attachment", false, "Send one email per attachment with [N/Total] prefix")
+
+	// List format
+	fs.StringVar(&listFormat, "list-format", "text", "Format for --recipient-list and --attachments-list: text (default) or json")
 
 	fs.BoolVar(&showVersion, "version", false, "Display application version")
 
@@ -301,28 +365,8 @@ func RunCLI(args []string) {
 	}
 
 	envPass := os.Getenv("MAILXGO_SMTP_PASSWORD")
-	if envPass == "" {
-		envPass = os.Getenv("MAIL2GO_SMTP_PASSWORD")
-	}
-	if envPass == "" {
-		envPass = os.Getenv("SMTP_USER_PASS")
-	}
-
 	envUser := os.Getenv("MAILXGO_SMTP_USERNAME")
-	if envUser == "" {
-		envUser = os.Getenv("MAIL2GO_SMTP_USERNAME")
-	}
-	if envUser == "" {
-		envUser = os.Getenv("SMTP_USER")
-	}
-
 	envToken := os.Getenv("MAILXGO_OAUTH_TOKEN")
-	if envToken == "" {
-		envToken = os.Getenv("MAIL2GO_OAUTH_TOKEN")
-	}
-	if envToken == "" {
-		envToken = os.Getenv("SMTP_OAUTH_TOKEN")
-	}
 
 	// Priority: Config file < Environment variables < CLI flags (last element wins)
 	useProvider = priorityString([]string{config.Use, useProvider})
@@ -442,8 +486,8 @@ func RunCLI(args []string) {
 			TLSCADir:       tlsCADir,
 			TLSFingerprint: tlsFingerprint,
 			Timeout:        timeout,
-			JSONOutput:   jsonOutput,
-			NDJSONOutput: ndjsonOutput,
+			JSONOutput:     jsonOutput,
+			NDJSONOutput:   ndjsonOutput,
 		}
 		if _, err := RunDiagnostics(diagParams, printCerts); err != nil {
 			osExit(ExitErrDNS)
@@ -465,7 +509,7 @@ func RunCLI(args []string) {
 		attachmentPaths = append(attachmentPaths, strings.Split(attachmentsFiles, ",")...)
 	}
 	if attachmentsList != "" {
-		listFileAttachments, err := LoadAttachmentList(attachmentsList)
+		listFileAttachments, _, err := LoadList(attachmentsList, listFormat, false)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading attachment list file %s: %v\n", attachmentsList, err)
 			osExit(ExitErrFileIO)
@@ -504,7 +548,7 @@ func RunCLI(args []string) {
 	}
 
 	if listFile != "" {
-		listRecipients, err := LoadRecipientList(listFile)
+		listRecipients, _, err := LoadList(listFile, listFormat, true)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading recipient list file %s: %v\n", listFile, err)
 			osExit(ExitErrFileIO)
@@ -521,6 +565,16 @@ func RunCLI(args []string) {
 	var bccEmails []string
 	if bccEmail != "" {
 		bccEmails = append(bccEmails, strings.Split(bccEmail, ",")...)
+	}
+
+	// Parse file routing
+	var routeSuccessPath, routeErrorPath string
+	if routePath != "" {
+		parts := strings.SplitN(routePath, ",", 2)
+		routeSuccessPath = strings.TrimSpace(parts[0])
+		if len(parts) > 1 {
+			routeErrorPath = strings.TrimSpace(parts[1])
+		}
 	}
 
 	params := EmailParams{
@@ -561,11 +615,29 @@ func RunCLI(args []string) {
 		MaxAttachmentMB:   maxAttachmentMB,
 		NDJSONOutput:      ndjsonOutput,
 		NoLogRecipients:   noLogRecipients,
+		DryRun:            dryRun,
+		Quiet:             quiet,
+		ReadReceipt:       readReceipt,
+
+		// New features
+		TemplateFile:     templateFile,
+		TemplateVars:     templateVars,
+		TemplateDataFile: templateDataFile,
+		Delay:            delay,
+		RateLimit:        rateLimit,
+		MaxRecipients:    maxRecipients,
+		SaveEMLPath:      saveEMLPath,
+		CompressEML:      compressEML,
+		RouteSuccessPath: routeSuccessPath,
+		RouteErrorPath:   routeErrorPath,
+		RouteDelete:      routeDelete,
+		SingleAttachment: singleAttachment,
+		SingleRecipient:  singleRecipient,
 	}
 
 	result, err := SendEmail(params)
 	if err != nil {
-		if !jsonOutput && !ndjsonOutput {
+		if !jsonOutput && !ndjsonOutput && !quiet {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 		}
 		// Use granular exit codes based on error type
@@ -576,7 +648,7 @@ func RunCLI(args []string) {
 			case ErrorTypeAuth:
 				osExit(ExitErrAuth)
 			case ErrorTypeConnection:
-				osExit(ExitErrDNS)
+				osExit(ExitErrConnection)
 			default:
 				osExit(ExitErrSend)
 			}

@@ -19,6 +19,7 @@ package mailxgo
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
@@ -80,6 +81,7 @@ func loadCustomCACerts(certFile, certDir string) (*x509.CertPool, error) {
 		if err := ValidateFilePath(certFile); err != nil {
 			return nil, fmt.Errorf("invalid CA cert path: %w", err)
 		}
+		// #nosec G304 -- Path pre-validated via ValidateFilePath (absolute path, no traversal)
 		pemData, err := os.ReadFile(certFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read CA cert file %s: %w", certFile, err)
@@ -108,6 +110,7 @@ func loadCustomCACerts(certFile, certDir string) (*x509.CertPool, error) {
 			if ext != ".pem" && ext != ".crt" && ext != ".cer" {
 				continue
 			}
+			// #nosec G304 -- certDir pre-validated via ValidateFilePath; name from ReadDir (no user input)
 			pemData, err := os.ReadFile(filepath.Join(certDir, name))
 			if err != nil {
 				return nil, fmt.Errorf("failed to read CA cert %s: %w", name, err)
@@ -181,4 +184,50 @@ func ValidateCertFingerprint(fingerprint string) error {
 		}
 	}
 	return nil
+}
+
+// TLSConfigParams holds parameters for building a TLS configuration.
+type TLSConfigParams struct {
+	ServerName     string
+	TLSMode        string
+	TLSCACert      string
+	TLSCADir       string
+	TLSFingerprint string
+}
+
+// BuildTLSConfig creates a tls.Config based on the provided parameters.
+// This centralizes TLS configuration to avoid duplication across mailer and diag code.
+func BuildTLSConfig(params TLSConfigParams) (*tls.Config, error) {
+	// #nosec G402 -- InsecureSkipVerify is user-configurable via ignore-trust mode for internal relays.
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: params.TLSMode == "ignore-trust",
+		ServerName:         params.ServerName,
+		MinVersion:         tls.VersionTLS12,
+	}
+
+	// Custom CA certificate or directory
+	if params.TLSCACert != "" || params.TLSCADir != "" {
+		rootCAs, err := loadCustomCACerts(params.TLSCACert, params.TLSCADir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load custom CA certificates: %w", err)
+		}
+		tlsConfig.RootCAs = rootCAs
+		tlsConfig.InsecureSkipVerify = false // Force verification when custom CA is provided
+	}
+
+	// Certificate fingerprint pinning
+	if params.TLSFingerprint != "" {
+		verifier := createFingerprintVerifier(params.TLSFingerprint)
+		tlsConfig.VerifyPeerCertificate = verifier
+		tlsConfig.InsecureSkipVerify = true // Skip default verification, use fingerprint instead
+		// VerifyConnection ensures fingerprint check runs on resumed sessions (G123 mitigation)
+		tlsConfig.VerifyConnection = func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return fmt.Errorf("no peer certificates presented")
+			}
+			return verifier([][]byte{cs.PeerCertificates[0].Raw}, nil)
+		}
+	}
+
+	return tlsConfig, nil
 }

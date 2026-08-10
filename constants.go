@@ -28,4 +28,8 @@ const (
 
 	// MaxEmailLength is the maximum allowed email address length per RFC 5321.
 	MaxEmailLength = 254
+
+	// DefaultMaxRecipients is the default maximum number of recipients per email.
+	// This prevents memory exhaustion with large recipient lists.
+	DefaultMaxRecipients = 1000
 )

@@ -76,6 +76,7 @@ The error handling design guarantees non-zero exit status codes for all abnormal
 | `ExitErrTLS` | `6` | SMTPS / STARTTLS handshake failure or certificate error. |
 | `ExitErrAuth` | `7` | SASL / XOAUTH2 authentication rejection. |
 | `ExitErrSend` | `8` | SMTP dial or payload transmission error. |
+| `ExitErrConnection` | `9` | TCP connection failure (timeout, refused, unreachable). |
 
 ---
 

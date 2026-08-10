@@ -218,29 +218,18 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 	var tlsState *tls.ConnectionState
 
 	if params.SMTPPort == 465 || params.TLSMode == "tls-direct" {
-		// #nosec G402 -- InsecureSkipVerify is user-configurable via ignore-trust mode for internal relays.
-		tlsConfig := &tls.Config{
-			InsecureSkipVerify: params.TLSMode == "ignore-trust",
-			ServerName:         params.SMTPServer,
-			MinVersion:         tls.VersionTLS12,
-		}
-
-		// Custom CA certificates
-		if params.TLSCACert != "" || params.TLSCADir != "" {
-			rootCAs, err := loadCustomCACerts(params.TLSCACert, params.TLSCADir)
-			if err != nil {
-				report.Status = "error"
-				report.Error = fmt.Sprintf("Failed to load custom CA certificates: %v", err)
-				return &report, OutputDiagReport(report, params.JSONOutput, params.NDJSONOutput, printCerts)
-			}
-			tlsConfig.RootCAs = rootCAs
-			tlsConfig.InsecureSkipVerify = false
-		}
-
-		// Certificate fingerprint pinning
-		if params.TLSFingerprint != "" {
-			tlsConfig.VerifyPeerCertificate = createFingerprintVerifier(params.TLSFingerprint)
-			tlsConfig.InsecureSkipVerify = true
+		// Use centralized TLS config builder
+		tlsConfig, err := BuildTLSConfig(TLSConfigParams{
+			ServerName:     params.SMTPServer,
+			TLSMode:        params.TLSMode,
+			TLSCACert:      params.TLSCACert,
+			TLSCADir:       params.TLSCADir,
+			TLSFingerprint: params.TLSFingerprint,
+		})
+		if err != nil {
+			report.Status = "error"
+			report.Error = fmt.Sprintf("Failed to configure TLS: %v", err)
+			return &report, OutputDiagReport(report, params.JSONOutput, params.NDJSONOutput, printCerts)
 		}
 
 		tTLS0 := time.Now()
@@ -291,29 +280,19 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 	// STARTTLS if supported and required
 	if ok, _ := client.Extension("STARTTLS"); ok && (params.TLSMode == "tls" || params.TLSMode == "ignore-trust") && params.SMTPPort != 465 {
 		report.Capabilities.StartTLS = true
-		// #nosec G402 -- InsecureSkipVerify is user-configurable via ignore-trust mode for internal relays.
-		tlsConfig := &tls.Config{
-			InsecureSkipVerify: params.TLSMode == "ignore-trust",
-			ServerName:         params.SMTPServer,
-			MinVersion:         tls.VersionTLS12,
-		}
 
-		// Custom CA certificates
-		if params.TLSCACert != "" || params.TLSCADir != "" {
-			rootCAs, err := loadCustomCACerts(params.TLSCACert, params.TLSCADir)
-			if err != nil {
-				report.Status = "error"
-				report.Error = fmt.Sprintf("Failed to load custom CA certificates: %v", err)
-				return &report, OutputDiagReport(report, params.JSONOutput, params.NDJSONOutput, printCerts)
-			}
-			tlsConfig.RootCAs = rootCAs
-			tlsConfig.InsecureSkipVerify = false
-		}
-
-		// Certificate fingerprint pinning
-		if params.TLSFingerprint != "" {
-			tlsConfig.VerifyPeerCertificate = createFingerprintVerifier(params.TLSFingerprint)
-			tlsConfig.InsecureSkipVerify = true
+		// Use centralized TLS config builder
+		tlsConfig, err := BuildTLSConfig(TLSConfigParams{
+			ServerName:     params.SMTPServer,
+			TLSMode:        params.TLSMode,
+			TLSCACert:      params.TLSCACert,
+			TLSCADir:       params.TLSCADir,
+			TLSFingerprint: params.TLSFingerprint,
+		})
+		if err != nil {
+			report.Status = "error"
+			report.Error = fmt.Sprintf("Failed to configure TLS: %v", err)
+			return &report, OutputDiagReport(report, params.JSONOutput, params.NDJSONOutput, printCerts)
 		}
 
 		tTLS0 := time.Now()
