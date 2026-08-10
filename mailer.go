@@ -602,7 +602,8 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 		clientOptions = append(clientOptions, mail.WithTLSPolicy(mail.NoTLS))
 	default:
 		clientOptions = append(clientOptions, mail.WithTLSConfig(tlsConfig))
-		if params.SMTPPort == 465 {
+		// Port 465 uses implicit TLS (SMTPS), tls-direct forces implicit TLS on any port
+		if params.SMTPPort == 465 || params.TLSMode == "tls-direct" {
 			clientOptions = append(clientOptions, mail.WithSSL())
 		} else {
 			clientOptions = append(clientOptions, mail.WithTLSPolicy(mail.TLSMandatory))
