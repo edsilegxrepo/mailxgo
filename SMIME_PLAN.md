@@ -22,7 +22,7 @@ Add S/MIME (Secure/Multipurpose Internet Mail Extensions) support to mailxgo for
 | `--smime-pkcs12` | String | Path to PKCS#12 bundle (.pfx/.p12) containing cert and key |
 | `--smime-recipient-cert` | String | Path to recipient certificate(s) for encryption (repeatable or comma-separated) |
 | `--smime-recipient-cert-dir` | String | Directory containing recipient certificates (.pem/.crt/.cer) - auto-indexed by SAN email |
-| `--smime-algorithm` | String | Encryption algorithm: `aes-256-cbc` (default), `aes-128-cbc`, `3des-cbc` |
+| `--smime-algorithm` | String | Encryption algorithm: `aes-256-gcm` (default), `aes-128-gcm`, `aes-256-cbc`, `aes-128-cbc`, `3des-cbc` |
 | `--smime-digest` | String | Signature digest: `sha256` (default), `sha384`, `sha512` |
 
 ## Config File Support
@@ -91,7 +91,7 @@ type SMIMEConfig struct {
     SignerKey         crypto.PrivateKey  // RSA or ECDSA
     IntermediateCerts []*x509.Certificate
     RecipientCerts    []*x509.Certificate
-    Algorithm         string // aes-256-cbc, aes-128-cbc, 3des-cbc (encryption only)
+    Algorithm         string // aes-256-gcm (default), aes-128-gcm, aes-256-cbc, aes-128-cbc, 3des-cbc
 }
 
 // Buffer pool for large payload processing (reduces GC pressure)
@@ -465,13 +465,71 @@ func ValidateCertForEncryption(cert *x509.Certificate) error {
 }
 ```
 
+## Implementation Notes
+
+### 1. sync.Pool Buffer Safety
+When using `smimeBufferPool` in `EncryptForRecipients()`, the buffer is recycled after the function returns. **Must copy the byte payload** before returning:
+
+```go
+// WRONG - caller gets corrupted data when buf is recycled
+return buf.Bytes(), nil
+
+// CORRECT - return independent copy
+return bytes.Clone(buf.Bytes()), nil
+// or: return append([]byte(nil), buf.Bytes()...), nil
+```
+
+### 2. SAN Email Matching Coverage
+Check both `cert.EmailAddresses` and `cert.URIs` with `mailto:` prefix to cover:
+- **OpenSSL-generated certs**: Use `cert.EmailAddresses` (standard rfc822Name SAN)
+- **Microsoft AD CS certs**: May also use `mailto:` URI in SAN
+
+```go
+// Index by EmailAddresses (standard)
+for _, email := range cert.EmailAddresses {
+    index[strings.ToLower(email)] = cert
+}
+// Also check URIs for mailto: (AD CS compatibility)
+for _, uri := range cert.URIs {
+    if strings.HasPrefix(uri.String(), "mailto:") {
+        email := strings.TrimPrefix(uri.String(), "mailto:")
+        index[strings.ToLower(email)] = cert
+    }
+}
+```
+
+### 3. pkcs7 Cipher Selection
+`go.mozilla.org/pkcs7` uses a **global variable** to set the encryption algorithm. Default is DES-CBC (weak!). Must set before calling `Encrypt()`:
+
+```go
+// Set cipher based on --smime-algorithm flag
+switch algorithm {
+case "aes-256-gcm":
+    pkcs7.ContentEncryptionAlgorithm = pkcs7.EncryptionAlgorithmAES256GCM
+case "aes-128-gcm":
+    pkcs7.ContentEncryptionAlgorithm = pkcs7.EncryptionAlgorithmAES128GCM
+case "aes-256-cbc":
+    pkcs7.ContentEncryptionAlgorithm = pkcs7.EncryptionAlgorithmAES256CBC
+case "aes-128-cbc":
+    pkcs7.ContentEncryptionAlgorithm = pkcs7.EncryptionAlgorithmAES128CBC
+case "3des-cbc":
+    pkcs7.ContentEncryptionAlgorithm = pkcs7.EncryptionAlgorithmDESCBC
+default:
+    pkcs7.ContentEncryptionAlgorithm = pkcs7.EncryptionAlgorithmAES256GCM // secure default
+}
+
+encrypted, err := pkcs7.Encrypt(content, recipients)
+```
+
+**Note**: The pkcs7 library recommends AES-GCM over AES-CBC for better security (authenticated encryption).
+
 ## Testing Strategy
 
 ### Unit Tests (`smime_test.go`)
 - Certificate/key loading (PEM and PKCS#12)
 - Auto-resolve certs by email (SAN/EmailAddresses)
 - Signing with various digest algorithms (SHA-256, SHA-384, SHA-512)
-- Encryption with various symmetric algorithms (AES-256-CBC, AES-128-CBC, 3DES)
+- Encryption with various symmetric algorithms (AES-256-GCM, AES-128-GCM, AES-256-CBC, AES-128-CBC, 3DES)
 - Sign + encrypt combined
 - Multi-recipient encryption
 - Pre-flight validation (expired certs, missing key usage)
