@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v1.4.0] - 2026-08-11
+
+### Added
+- **S/MIME Encryption & Digital Signing**: Full end-to-end payload security per RFC 5751 / RFC 8551.
+  - `--smime-sign`: Cryptographically sign outgoing messages using sender's RSA/ECDSA key.
+  - `--smime-encrypt`: Encrypt email body and attachments using recipient X.509 certificates.
+  - `--smime-cert` & `--smime-key`: Specify sender's X.509 certificate and private key files.
+  - `--smime-key-password`: Passphrase for encrypted private keys (supports `v1:gcm:` encrypted secrets).
+  - `--smime-pkcs12`: Load enterprise PKCS#12 (`.pfx`/`.p12`) bundles containing client cert, private key, and CA chain.
+  - `--smime-recipient-cert` & `--smime-recipient-cert-dir`: Recipient public cert resolution with automatic SAN email/`mailto:` index matching.
+  - `--smime-algorithm`: Cipher selection (`aes-256-gcm`, `aes-128-gcm`, `aes-256-cbc`, `3des-cbc`). Note: `--smime-digest` reserved for future use (go-mail uses SHA-256 internally).
+- **S/MIME Pre-Flight Diagnostics**: Extended `--diag` mode to audit signer/recipient cert validity, expiration warnings (<30 days), X.509 `KeyUsage` flags (`DigitalSignature`, `KeyEncipherment`, `EmailProtection`), and key file permissions.
+- **S/MIME Pre-Dial Bounds Check**: Account for S/MIME Base64 + PKCS#7 envelope size overhead (1.37x expansion) prior to establishing SMTP connections.
+- **S/MIME Default Credentials**: Config file support for `smime_default_cert`, `smime_default_key`, `smime_default_key_password`, and `smime_default_pkcs12` to simplify CLI usage for automated schedulers.
+- **ESMTP SIZE Pre-Check**: For S/MIME encrypted payloads >1MB, probe server SIZE extension before sending to fail fast on oversized messages.
+
 ## [v1.3.1] - 2026-08-10
 
 ### Added

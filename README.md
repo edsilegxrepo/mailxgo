@@ -85,48 +85,84 @@
 
 ## 4. Command Line Arguments Reference
 
+### 4.1 SMTP Gateway & Authentication Options
 | Argument | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `--smtp-server` | String | `""` | Target SMTP server hostname or IP address |
 | `--smtp-port` | Integer | `587` | Target SMTP server port |
 | `--smtp-username` | String | `""` | Username for SMTP authentication |
-| `--smtp-password` | String | `""` | Password for SMTP authentication (supports v1:gcm: encrypted secrets) |
-| `--no-auth` | Boolean | `false` | Disable SMTP authentication |
-| `--use` | String | `""` | Mail provider preset (office365, googleworkspace, aws-ses, sendgrid, etc.) |
-| `--auth-type` | String | `"auto"` | SASL authentication mechanism (auto, login, plain, cram-md5, xoauth2) |
+| `--smtp-password` | String | `""` | Password for SMTP authentication (supports `v1:gcm:` encrypted secrets) |
+| `--no-auth` | Boolean | `false` | Disable SMTP authentication (anonymous relay) |
+| `--use` | String | `""` | Mail provider preset (`office365`, `googleworkspace`, `aws-ses`, `protonmail`, etc.) |
+| `--auth-type` | String | `"auto"` | SASL authentication mechanism (`auto`, `login`, `plain`, `cram-md5`, `xoauth2`, `noauth`) |
 | `--oauth2` | Boolean | `false` | Enable XOAUTH2 authentication mode |
-| `--token` | String | `""` | OAuth2 access token for XOAUTH2 authentication (supports v1:gcm: encrypted secrets) |
-| `--charset` | String | `"UTF-8"` | Custom body character set encoding |
-| `--tls-mode` | String | `"tls"` | TLS transport policy (tls, ignore-trust, none) |
-| `--tls-ca-cert` | String | `""` | Path to CA certificate file (PEM) for custom trust |
-| `--tls-ca-dir` | String | `""` | Path to directory containing CA certificates (PEM) |
-| `--tls-fingerprint` | String | `""` | SHA256 fingerprint for certificate pinning (hex) |
-| `--config` | String | `""` | Path to JSON configuration file |
+| `--token` | String | `""` | OAuth2 access token for XOAUTH2 authentication (supports `v1:gcm:` encrypted secrets) |
+
+### 4.2 Email Headers & Recipient Routing Options
+| Argument | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
 | `--from-email` | String | `""` | Sender email address |
 | `--from-name` | String | `""` | Friendly display name of sender |
 | `--to-email` | String | `""` | Recipient email addresses (comma-separated) |
 | `--cc` | String | `""` | Carbon Copy (CC) email addresses (comma-separated) |
 | `--bcc` | String | `""` | Blind Carbon Copy (BCC) email addresses (comma-separated) |
 | `--recipient-list` | String | `""` | Path to file containing recipient email addresses |
-| `--list-format` | String | `"text"` | Format for --recipient-list and --attachments-list: text or json |
+| `--list-format` | String | `"text"` | Format for `--recipient-list` and `--attachments-list` (`text` or `json`) |
 | `--reply-to` | String | `""` | Reply-To email address |
 | `--subject` | String | `""` | Email subject line |
+| `--header` | String | `""` | Custom MIME header in `Header-Name: Value` format (repeatable) |
+| `--read-receipt` | Boolean | `false` | Request read receipt (`Disposition-Notification-To` header) |
+| `--importance` | String | `""` | Priority level (`high`, `normal`, `low`) |
+| `--dsn-notify` | String | `""` | DSN notification options (`SUCCESS`, `FAILURE`, `DELAY`, `NEVER`) |
+| `--dsn-return` | String | `""` | DSN return option (`FULL`, `HDRS`) |
+
+### 4.3 Body Content & Templating Options
+| Argument | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
 | `--body` | String | `""` | Plaintext email body content |
-| `--body-file` | String | `""` | Path to file containing HTML email body content |
+| `--body-file` | String | `""` | Path to file containing HTML/plaintext email body content |
 | `--template` | String | `""` | Path to Go template file for body |
 | `--template-data` | String | `""` | Path to JSON file with template variables |
 | `--var` | String | `""` | Template variable in `Name: Value` format (repeatable) |
+| `--charset` | String | `"UTF-8"` | Custom body character set encoding |
+
+### 4.4 Attachments & Routing Management
+| Argument | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
 | `--attachments` | String | `""` | Attachment file paths (comma-separated) |
 | `--attachments-list` | String | `""` | Path to file containing attachment file paths |
 | `--attachments-dir` | String | `""` | Path to directory whose regular file contents will be attached |
-| `--max-attachment-size` | Integer | `0` | Maximum combined attachment size limit in MB (0 = disabled) |
-| `--single-attachment` | Boolean | `false` | Send one email per attachment with [N/Total] prefix |
+| `--max-attachment-size` | Integer | `0` | Maximum combined attachment size limit in MB (`0` = disabled) |
+| `--single-attachment` | Boolean | `false` | Send one email per attachment with `[N/Total]` prefix |
 | `--inline-attachments` | String | `""` | File paths for inline embedded images (comma-separated) |
 | `--route` | String | `""` | Move body file/attachments after send: `successPath,errorPath` |
 | `--delete` | Boolean | `false` | Delete body file/attachments after successful send |
-| `--header` | String | `""` | Custom MIME header in `Header-Name: Value` format (repeatable) |
-| `--log-file` | String | `""` | File path to append execution audit logs |
-| `--no-log-recipients` | Boolean | `false` | Redact recipient addresses in log files (GDPR/privacy) |
+
+### 4.5 S/MIME Security & Encryption Options (RFC 5751 / RFC 8551)
+| Argument | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--smime-sign` | Boolean | `false` | Enable S/MIME digital signing using sender certificate and private key |
+| `--smime-encrypt` | Boolean | `false` | Enable S/MIME PKCS#7 envelope payload encryption |
+| `--smime-cert` | String | `""` | Path to PEM-encoded certificate file for S/MIME digital signing |
+| `--smime-key` | String | `""` | Path to PEM-encoded RSA/ECDSA private key file for S/MIME digital signing |
+| `--smime-key-password` | String | `""` | Passphrase to decrypt encrypted PEM private key (supports `v1:gcm:` encrypted secrets) |
+| `--smime-pkcs12` | String | `""` | Path to PKCS#12 bundle (`.pfx`/`.p12`) containing cert and private key |
+| `--smime-recipient-cert` | String | `""` | Path to recipient public certificate (PEM) for S/MIME encryption (comma-separated) |
+| `--smime-recipient-cert-dir` | String | `""` | Directory containing recipient certificates (`.pem`, `.crt`, `.cer`) indexed by email |
+| `--smime-algorithm` | String | `"aes-256-gcm"` | S/MIME payload encryption algorithm (`aes-256-gcm`, `aes-128-gcm`, `aes-256-cbc`, `aes-128-cbc`, `3des-cbc`) |
+| `--smime-digest` | String | `"sha256"` | S/MIME signature digest (reserved; go-mail uses SHA-256 internally) |
+
+### 4.6 TLS Transport & Certificate Pinning Options
+| Argument | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--tls-mode` | String | `"tls"` | TLS transport policy (`tls`, `ignore-trust`, `tls-direct`, `none`) |
+| `--tls-ca-cert` | String | `""` | Path to CA certificate file (PEM) for custom trust |
+| `--tls-ca-dir` | String | `""` | Path to directory containing CA certificates (PEM) |
+| `--tls-fingerprint` | String | `""` | SHA256 fingerprint for certificate pinning (hex) |
+
+### 4.7 Delivery Controls, Rate Limiting & Retries
+| Argument | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
 | `--retries` | Integer | `0` | Retries on network socket dial failure |
 | `--retry-delay` | Integer | `5` | Delay in seconds between dial retries |
 | `--timeout` | Integer | `30` | Socket connection timeout in seconds |
@@ -134,22 +170,29 @@
 | `--rate-limit` | Integer | `0` | Max emails per minute (for batch/multi-recipient) |
 | `--max-recipients` | Integer | `1000` | Maximum recipients per email (memory protection) |
 | `--single-recipient` | Boolean | `false` | Send one email per recipient with rate limiting |
-| `--dsn-notify` | String | `""` | DSN notification options (SUCCESS, FAILURE, DELAY, NEVER) |
-| `--dsn-return` | String | `""` | DSN return option (FULL, HDRS) |
-| `--importance` | String | `""` | Priority level (high, normal, low) |
-| `--dry-run` | Boolean | `false` | Validate config and connect but don't send |
-| `--read-receipt` | Boolean | `false` | Request read receipt (Disposition-Notification-To header) |
-| `--json-output` | Boolean | `false` | Output results in formatted JSON |
-| `--ndjson-output`, `--ndjson` | Boolean | `false` | Output results in single-line NDJSON format |
-| `--quiet`, `-q` | Boolean | `false` | Suppress output except errors |
-| `--save-eml` | String | `""` | Directory to save .eml archive after successful send |
-| `--compress` | Boolean | `false` | Compress .eml archive with zstd |
+| `--dry-run` | Boolean | `false` | Validate configuration and connectivity without sending |
+
+### 4.8 Gateway Diagnostics & Audit Logging
+| Argument | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
 | `--diag`, `--info` | Boolean | `false` | Execute pre-flight gateway diagnostics probe and exit |
 | `--print-certs` | Boolean | `false` | Display full TLS certificate chain during diagnostics |
+| `--log-file` | String | `""` | File path to append execution audit logs |
+| `--no-log-recipients` | Boolean | `false` | Redact recipient addresses in log files (GDPR/privacy) |
 | `--debug` | Boolean | `false` | Enable protocol wire debug logging |
-| `--version` | Boolean | `false` | Display application version |
 
-### 4.1 Built-in Provider Presets Reference (`--use <preset>`)
+### 4.9 Archiving, Output Formatting & Global Flags
+| Argument | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--config` | String | `""` | Path to JSON configuration file |
+| `--save-eml` | String | `""` | Directory to save `.eml` archive after successful send |
+| `--compress` | Boolean | `false` | Compress `.eml` archive with zstd compression |
+| `--json-output` | Boolean | `false` | Output execution results in formatted JSON |
+| `--ndjson-output`, `--ndjson` | Boolean | `false` | Output execution results in single-line NDJSON format |
+| `--quiet`, `-q` | Boolean | `false` | Suppress output except errors |
+| `--version`, `-v` | Boolean | `false` | Display application version |
+
+### 4.10 Built-in Provider Presets Reference (`--use <preset>`)
 
 | Preset Name | Hostname | Port | TLS Mode |
 | :--- | :--- | :--- | :--- |

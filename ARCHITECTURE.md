@@ -117,6 +117,8 @@ sequenceDiagram
 ```mermaid
 graph LR
     mailxgo["mailxgo (package mailxgo)"] --> GoMail["github.com/wneessen/go-mail v0.8.1"]
+    mailxgo --> PKCS7["go.mozilla.org/pkcs7"]
+    mailxgo --> PKCS12["golang.org/x/crypto/pkcs12"]
     mailxgo --> SecProt["github.com/edsilegxrepo/secretprotector"]
     mailxgo --> StandardNet["net (Go Standard Library)"]
     mailxgo --> StandardSMTP["net/smtp (Go Standard Library)"]
@@ -126,7 +128,9 @@ graph LR
 ```
 
 ### 4.2 Module Inventory
-* **Core Transport Engine:** `github.com/wneessen/go-mail v0.8.1` (Native Go ESMTP implementation, maintained, zero external indirect dependencies).
+* **Core Transport Engine:** `github.com/wneessen/go-mail v0.8.1` (Native Go ESMTP implementation with S/MIME signing support).
+* **S/MIME Encryption:** `go.mozilla.org/pkcs7` (PKCS#7 EnvelopedData encryption for S/MIME payloads).
+* **PKCS#12 Bundles:** `golang.org/x/crypto/pkcs12` (Load enterprise .pfx/.p12 certificate bundles).
 * **Secret Management:** `github.com/edsilegxrepo/secretprotector` (AES-256-GCM credential encryption/decryption).
 * **Standard Library Dependencies:** `net`, `net/smtp`, `crypto/tls`, `crypto/sha256`, `crypto/x509`, `encoding/json`, `encoding/hex`, `os`, `bufio`, `path/filepath`, `strings`, `flag`, `fmt`, `sort`, `strconv`, `time`.
 

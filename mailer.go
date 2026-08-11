@@ -17,6 +17,7 @@ package mailxgo
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -188,6 +189,18 @@ type EmailParams struct {
 	// Single attachment mode
 	SingleAttachment bool // Send one email per attachment with [N/Total] prefix
 	SingleRecipient  bool // Send one email per recipient with rate limiting
+
+	// S/MIME Security Configuration
+	SMIMESign             bool
+	SMIMEEncrypt          bool
+	SMIMECert             string
+	SMIMEKey              string
+	SMIMEKeyPassword      string
+	SMIMEPKCS12           string
+	SMIMERecipientCerts   []string
+	SMIMERecipientCertDir string
+	SMIMEAlgorithm        string
+	SMIMEDigest           string
 }
 
 // JSONResult represents the structured telemetry output payload for email dispatch execution.
@@ -538,6 +551,71 @@ func SendEmail(params EmailParams) (*JSONResult, error) {
 	// Read Receipt (Disposition-Notification-To header)
 	if params.ReadReceipt {
 		m.SetGenHeader("Disposition-Notification-To", params.From)
+	}
+
+	// ==========================================================================
+	// S/MIME SIGNING & ENCRYPTION PIPELINE
+	// ==========================================================================
+	if params.SMIMESign || params.SMIMEEncrypt {
+		smimeCfg, err := setupSMIMEConfig(&params)
+		if err != nil {
+			return nil, fmt.Errorf("S/MIME configuration error: %w", err)
+		}
+
+		if smimeCfg.Sign {
+			var interCert *x509.Certificate
+			if len(smimeCfg.IntermediateCerts) > 0 {
+				interCert = smimeCfg.IntermediateCerts[0]
+			}
+			if err := m.SignWithKeypair(smimeCfg.SignerKey, smimeCfg.SignerCert, interCert); err != nil {
+				return nil, fmt.Errorf("S/MIME signing failed: %w", err)
+			}
+		}
+
+		if smimeCfg.Encrypt {
+			var rawBuf bytes.Buffer
+			if _, err := m.WriteTo(&rawBuf); err != nil {
+				return nil, fmt.Errorf("failed to export MIME bytes for S/MIME encryption: %w", err)
+			}
+			encBytes, err := EncryptForRecipients(rawBuf.Bytes(), smimeCfg.RecipientCerts, smimeCfg.Algorithm)
+			if err != nil {
+				return nil, fmt.Errorf("S/MIME payload encryption failed: %w", err)
+			}
+
+			// Create replacement MIME container with application/pkcs7-mime body
+			mEnc := mail.NewMsg()
+			if params.FromName != "" {
+				_ = mEnc.FromFormat(params.FromName, params.From)
+			} else {
+				_ = mEnc.From(params.From)
+			}
+			_ = mEnc.To(params.To...)
+			if len(params.CC) > 0 {
+				_ = mEnc.Cc(params.CC...)
+			}
+			if len(params.BCC) > 0 {
+				_ = mEnc.Bcc(params.BCC...)
+			}
+			mEnc.Subject(params.Subject)
+			mEnc.SetBodyString("application/pkcs7-mime; name=\"smime.p7m\"; smime-type=enveloped-data", FormatBase64MIME(encBytes))
+			mEnc.SetGenHeader("Content-Transfer-Encoding", "base64")
+			mEnc.SetGenHeader("Content-Disposition", `attachment; filename="smime.p7m"`)
+			mEnc.SetEncoding(mail.NoEncoding)
+			m = mEnc
+
+			// Pre-dial SIZE check: probe server for ESMTP SIZE limit before sending large encrypted payload
+			encryptedSize := int64(len(encBytes))
+			if encryptedSize > 1024*1024 { // Only probe for payloads > 1MB
+				if serverMaxSize, err := ProbeESMTPSize(params.SMTPServer, params.SMTPPort, params.TLSMode); err == nil && serverMaxSize > 0 {
+					// Estimate final message size (encrypted payload + headers overhead ~2KB)
+					estimatedTotal := encryptedSize + 2048
+					if estimatedTotal > serverMaxSize {
+						return nil, fmt.Errorf("S/MIME encrypted payload (%d bytes) exceeds server SIZE limit (%d bytes)",
+							estimatedTotal, serverMaxSize)
+					}
+				}
+			}
+		}
 	}
 
 	// Client Options
@@ -1292,4 +1370,98 @@ func sendSingleRecipientMode(params EmailParams) (*JSONResult, error) {
 	}
 
 	return finalResult, nil
+}
+
+// setupSMIMEConfig constructs and validates SMIMEConfig from EmailParams.
+func setupSMIMEConfig(params *EmailParams) (*SMIMEConfig, error) {
+	config := &SMIMEConfig{
+		Sign:            params.SMIMESign,
+		Encrypt:         params.SMIMEEncrypt,
+		Algorithm:       params.SMIMEAlgorithm,
+		DigestAlgorithm: params.SMIMEDigest,
+	}
+
+	// 1. Signer Credentials (PKCS#12 or PEM)
+	if params.SMIMEPKCS12 != "" {
+		pass := params.SMIMEKeyPassword
+		if decrypted, err := DecryptSecret(pass, ""); err == nil {
+			pass = decrypted
+		}
+		cert, key, caCerts, err := LoadPKCS12(params.SMIMEPKCS12, pass)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load S/MIME PKCS#12 bundle: %w", err)
+		}
+		config.SignerCert = cert
+		config.SignerKey = key
+		config.IntermediateCerts = caCerts
+	} else if params.SMIMECert != "" && params.SMIMEKey != "" {
+		cert, err := LoadCertificate(params.SMIMECert)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load S/MIME cert: %w", err)
+		}
+		pass := params.SMIMEKeyPassword
+		if decrypted, err := DecryptSecret(pass, ""); err == nil {
+			pass = decrypted
+		}
+		key, err := LoadPrivateKey(params.SMIMEKey, pass)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load S/MIME private key: %w", err)
+		}
+		config.SignerCert = cert
+		config.SignerKey = key
+	}
+
+	if config.Sign {
+		if config.SignerCert == nil || config.SignerKey == nil {
+			return nil, fmt.Errorf("S/MIME signing enabled but no valid certificate and key provided")
+		}
+		if err := ValidateCertForSigning(config.SignerCert); err != nil {
+			return nil, fmt.Errorf("invalid S/MIME signer cert: %w", err)
+		}
+	}
+
+	// 2. Recipient Certificates
+	var recipientCerts []*x509.Certificate
+	for _, certPath := range params.SMIMERecipientCerts {
+		if certPath != "" {
+			cert, err := LoadCertificate(certPath)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load recipient cert %s: %w", certPath, err)
+			}
+			recipientCerts = append(recipientCerts, cert)
+		}
+	}
+
+	if params.SMIMERecipientCertDir != "" {
+		dirCerts, err := LoadCertificatesFromDir(params.SMIMERecipientCertDir)
+		if err == nil && len(dirCerts) > 0 {
+			certIndex := BuildCertIndex(dirCerts)
+			allRecipients := append(append([]string(nil), params.To...), params.CC...)
+			for _, email := range allRecipients {
+				if cert := ResolveCertForEmail(certIndex, email); cert != nil {
+					recipientCerts = append(recipientCerts, cert)
+				}
+			}
+		}
+	}
+
+	config.RecipientCerts = recipientCerts
+
+	if config.Encrypt {
+		if len(config.RecipientCerts) == 0 {
+			return nil, fmt.Errorf("S/MIME encryption enabled but no valid recipient certificates resolved")
+		}
+		// Verify all To and CC recipients have a resolved certificate
+		certIndex := BuildCertIndex(config.RecipientCerts)
+		allRecipients := append(append([]string(nil), params.To...), params.CC...)
+		for _, email := range allRecipients {
+			if clean := strings.TrimSpace(email); clean != "" {
+				if ResolveCertForEmail(certIndex, clean) == nil {
+					return nil, fmt.Errorf("S/MIME encryption failed: missing certificate for recipient %s", clean)
+				}
+			}
+		}
+	}
+
+	return config, nil
 }

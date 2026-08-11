@@ -235,6 +235,18 @@ func RunCLI(args []string) {
 		singleAttachment bool
 		singleRecipient  bool
 		listFormat       string // "text" (default) or "json"
+
+		// S/MIME flags
+		smimeSign             bool
+		smimeEncrypt          bool
+		smimeCert             string
+		smimeKey              string
+		smimeKeyPassword      string
+		smimePKCS12           string
+		smimeRecipientCert    string
+		smimeRecipientCertDir string
+		smimeAlgorithm        string
+		smimeDigest           string
 	)
 
 	// Long-form flags
@@ -243,6 +255,18 @@ func RunCLI(args []string) {
 	fs.StringVar(&username, "smtp-username", "", "Username for SMTP authentication")
 	fs.StringVar(&password, "smtp-password", "", "Password for SMTP authentication")
 	fs.BoolVar(&noAuth, "no-auth", false, "Use unauthenticated SMTP")
+
+	// S/MIME Security Flags
+	fs.BoolVar(&smimeSign, "smime-sign", false, "Sign outgoing message with sender's private key")
+	fs.BoolVar(&smimeEncrypt, "smime-encrypt", false, "Encrypt message for recipients using their public certificates")
+	fs.StringVar(&smimeCert, "smime-cert", "", "Path to sender's X.509 certificate (PEM) for signing")
+	fs.StringVar(&smimeKey, "smime-key", "", "Path to sender's private key (PEM) for signing")
+	fs.StringVar(&smimeKeyPassword, "smime-key-password", "", "Password for encrypted private key (supports v1:gcm: encrypted secrets)")
+	fs.StringVar(&smimePKCS12, "smime-pkcs12", "", "Path to PKCS#12 bundle (.pfx/.p12) containing cert and key")
+	fs.StringVar(&smimeRecipientCert, "smime-recipient-cert", "", "Path to recipient certificate(s) for encryption (comma-separated)")
+	fs.StringVar(&smimeRecipientCertDir, "smime-recipient-cert-dir", "", "Directory containing recipient certificates (.pem/.crt/.cer)")
+	fs.StringVar(&smimeAlgorithm, "smime-algorithm", "aes-256-gcm", "S/MIME encryption algorithm (aes-256-gcm, aes-128-gcm, aes-256-cbc, aes-128-cbc, 3des-cbc)")
+	fs.StringVar(&smimeDigest, "smime-digest", "sha256", "S/MIME signature digest algorithm (sha256, sha384, sha512)")
 
 	fs.StringVar(&authType, "auth-type", "auto", "SASL Auth mechanism (auto, login, plain, cram-md5, xoauth2)")
 	fs.BoolVar(&oauth2Mode, "oauth2", false, "Enable XOAUTH2 authentication mode")
@@ -577,6 +601,13 @@ func RunCLI(args []string) {
 		}
 	}
 
+	var recipientCertPaths []string
+	if smimeRecipientCert != "" {
+		recipientCertPaths = append(recipientCertPaths, strings.Split(smimeRecipientCert, ",")...)
+	} else if len(config.SMIMERecipientCerts) > 0 {
+		recipientCertPaths = config.SMIMERecipientCerts
+	}
+
 	params := EmailParams{
 		SMTPServer:        smtpServer,
 		SMTPPort:          smtpPort,
@@ -633,6 +664,18 @@ func RunCLI(args []string) {
 		RouteDelete:      routeDelete,
 		SingleAttachment: singleAttachment,
 		SingleRecipient:  singleRecipient,
+
+		// S/MIME Security Configuration (CLI > config > default fallback)
+		SMIMESign:             config.SMIMESign || smimeSign,
+		SMIMEEncrypt:          config.SMIMEEncrypt || smimeEncrypt,
+		SMIMECert:             priorityString([]string{smimeCert, config.SMIMECert, config.SMIMEDefaultCert}),
+		SMIMEKey:              priorityString([]string{smimeKey, config.SMIMEKey, config.SMIMEDefaultKey}),
+		SMIMEKeyPassword:      priorityString([]string{smimeKeyPassword, config.SMIMEKeyPassword, config.SMIMEDefaultKeyPassword}),
+		SMIMEPKCS12:           priorityString([]string{smimePKCS12, config.SMIMEPKCS12, config.SMIMEDefaultPKCS12}),
+		SMIMERecipientCerts:   recipientCertPaths,
+		SMIMERecipientCertDir: priorityString([]string{smimeRecipientCertDir, config.SMIMERecipientCertDir}),
+		SMIMEAlgorithm:        priorityString([]string{smimeAlgorithm, config.SMIMEAlgorithm}),
+		SMIMEDigest:           priorityString([]string{smimeDigest, config.SMIMEDigest}),
 	}
 
 	result, err := SendEmail(params)

@@ -198,10 +198,11 @@ type TLSConfigParams struct {
 // BuildTLSConfig creates a tls.Config based on the provided parameters.
 // This centralizes TLS configuration to avoid duplication across mailer and diag code.
 func BuildTLSConfig(params TLSConfigParams) (*tls.Config, error) {
-	// #nosec G402 -- InsecureSkipVerify is user-configurable via ignore-trust mode for internal relays.
-	// tls-direct mode also supports InsecureSkipVerify for self-signed certs on implicit TLS ports
+	// InsecureSkipVerify is user-configurable via ignore-trust mode for internal relays.
+	// tls-direct mode also supports InsecureSkipVerify for self-signed certs on implicit TLS ports.
 	skipVerify := params.TLSMode == "ignore-trust" || params.TLSMode == "tls-direct"
 	tlsConfig := &tls.Config{
+		// #nosec G402 -- User-configurable TLS modes (ignore-trust, tls-direct) for internal relays and self-signed certs
 		InsecureSkipVerify: skipVerify,
 		ServerName:         params.ServerName,
 		MinVersion:         tls.VersionTLS12,

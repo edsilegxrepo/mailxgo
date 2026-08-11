@@ -94,6 +94,17 @@ type DNSDiagInfo struct {
 	DMARCRecord string   `json:"dmarc_record,omitempty"`
 }
 
+// SMIMEDiagInfo stores S/MIME certificate diagnostic results.
+type SMIMEDiagInfo struct {
+	SignerCertSubject  string   `json:"signer_cert_subject,omitempty"`
+	SignerCertExpiry   string   `json:"signer_cert_expiry,omitempty"`
+	SignerDaysLeft     int      `json:"signer_days_left,omitempty"`
+	SignerKeyUsageOK   bool     `json:"signer_key_usage_ok,omitempty"`
+	SignerKeyDecryptOK bool     `json:"signer_key_decrypt_ok,omitempty"`
+	RecipientCerts     []string `json:"recipient_certs,omitempty"`
+	Warnings           []string `json:"warnings,omitempty"`
+}
+
 // DiagReport aggregates complete diagnostic probe findings for telemetry rendering.
 type DiagReport struct {
 	Status       string            `json:"status"`
@@ -105,6 +116,7 @@ type DiagReport struct {
 	Latency      LatencyMetrics    `json:"latency"`
 	Capabilities ESMTPCapabilities `json:"capabilities"`
 	TLSInfo      *TLSCertInfo      `json:"tls_info,omitempty"`
+	SMIMEInfo    *SMIMEDiagInfo    `json:"smime_info,omitempty"`
 	Error        string            `json:"error,omitempty"`
 }
 
@@ -152,6 +164,10 @@ func RunDiagnostics(params EmailParams, printCerts bool) (*DiagReport, error) {
 		DNSInfo: DNSDiagInfo{
 			TargetHost: params.SMTPServer,
 		},
+	}
+
+	if params.SMIMESign || params.SMIMEEncrypt || params.SMIMECert != "" || params.SMIMEPKCS12 != "" || len(params.SMIMERecipientCerts) > 0 || params.SMIMERecipientCertDir != "" {
+		report.SMIMEInfo = runSMIMEDiagnostics(params)
 	}
 
 	timeoutSec := params.Timeout
@@ -488,6 +504,67 @@ func OutputDiagReport(report DiagReport, jsonOutput bool, ndjsonOutput bool, pri
 		}
 	}
 
+	if report.SMIMEInfo != nil && !jsonOutput && !ndjsonOutput {
+		fmt.Println("\n--- S/MIME Certificate Diagnostics ---")
+		if report.SMIMEInfo.SignerCertSubject != "" {
+			fmt.Printf("Signer Subject     : %s\n", report.SMIMEInfo.SignerCertSubject)
+			fmt.Printf("Signer Expiration  : %s (%d days remaining)\n", report.SMIMEInfo.SignerCertExpiry, report.SMIMEInfo.SignerDaysLeft)
+			fmt.Printf("Signer Key Usage   : DigitalSignature (OK: %t)\n", report.SMIMEInfo.SignerKeyUsageOK)
+			fmt.Printf("Signer Key Decrypt : OK (%t)\n", report.SMIMEInfo.SignerKeyDecryptOK)
+		}
+		if len(report.SMIMEInfo.RecipientCerts) > 0 {
+			fmt.Println("Recipient Certificates:")
+			for i, rc := range report.SMIMEInfo.RecipientCerts {
+				fmt.Printf("  [%d] %s\n", i+1, rc)
+			}
+		}
+		if len(report.SMIMEInfo.Warnings) > 0 {
+			fmt.Println("Warnings:")
+			for _, w := range report.SMIMEInfo.Warnings {
+				fmt.Printf("  - %s\n", w)
+			}
+		}
+	}
+
 	fmt.Println("\nGateway Probe Complete: SUCCESS")
 	return nil
+}
+
+func runSMIMEDiagnostics(params EmailParams) *SMIMEDiagInfo {
+	info := &SMIMEDiagInfo{}
+	smimeCfg, err := setupSMIMEConfig(&params)
+	keyPath := params.SMIMEKey
+	if err != nil {
+		info.Warnings = append(info.Warnings, fmt.Sprintf("S/MIME config error: %v", err))
+		return info
+	}
+
+	info.Warnings = append(info.Warnings, CheckCryptoHygiene(smimeCfg, keyPath)...)
+
+	if smimeCfg.SignerCert != nil {
+		info.SignerCertSubject = smimeCfg.SignerCert.Subject.CommonName
+		info.SignerCertExpiry = smimeCfg.SignerCert.NotAfter.Format(time.RFC3339)
+		info.SignerDaysLeft = int(time.Until(smimeCfg.SignerCert.NotAfter).Hours() / 24)
+		if err := ValidateCertForSigning(smimeCfg.SignerCert); err == nil {
+			info.SignerKeyUsageOK = true
+		} else {
+			info.Warnings = append(info.Warnings, fmt.Sprintf("Signer cert validation warning: %v", err))
+		}
+		if smimeCfg.SignerKey != nil {
+			info.SignerKeyDecryptOK = true
+		}
+	}
+
+	for _, cert := range smimeCfg.RecipientCerts {
+		if cert != nil {
+			cn := cert.Subject.CommonName
+			if len(cert.EmailAddresses) > 0 {
+				cn = cert.EmailAddresses[0]
+			}
+			daysLeft := int(time.Until(cert.NotAfter).Hours() / 24)
+			info.RecipientCerts = append(info.RecipientCerts, fmt.Sprintf("%s (expires %s, %d days left)", cn, cert.NotAfter.Format("2006-01-02"), daysLeft))
+		}
+	}
+
+	return info
 }

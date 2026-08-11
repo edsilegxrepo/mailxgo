@@ -21,11 +21,13 @@ package mailxgo_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	crand "crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -45,25 +47,40 @@ import (
 
 	mailxgo "github.com/edsilegxrepo/mailxgo"
 	"github.com/edsilegxrepo/secretprotector/pkg/libsecsecrets"
+	"go.mozilla.org/pkcs7"
 )
 
 const (
-	smtpHost           = "127.0.0.1"
-	smtpPort           = 1025
-	smtpPortSSL        = 1465 // Implicit TLS (SMTPS) port
-	mailpitAPI         = "http://127.0.0.1:8025/api"
-	containerName      = "mailxgo-integration-smtp"
-	containerNameSSL   = "mailxgo-integration-smtp-ssl"
+	smtpHost         = "127.0.0.1"
+	smtpPort         = 1025
+	smtpPortSSL      = 1465 // Implicit TLS (SMTPS) port
+	mailpitAPI       = "http://127.0.0.1:8025/api"
+	containerName    = "mailxgo-integration-smtp"
+	containerNameSSL = "mailxgo-integration-smtp-ssl"
+)
+
+// Latency settings: WSL Docker has much higher latency than native Linux Docker.
+// These timeouts are tuned for reliable CI on both environments.
+const (
+	// Native Linux Docker timeouts
+	nativeContainerTimeout = 15 * time.Second
+	nativeDialTimeout      = 100 * time.Millisecond
+	nativeMessageWait      = 200 * time.Millisecond
+
+	// WSL Docker timeouts (Windows host with WSL2 backend)
+	wslContainerTimeout = 60 * time.Second
+	wslDialTimeout      = 2 * time.Second
+	wslMessageWait      = 500 * time.Millisecond
 )
 
 var (
-	mailpitReady       bool
-	mailpitSSLReady    bool
-	mailpitSetupOnce   sync.Once
+	mailpitReady        bool
+	mailpitSSLReady     bool
+	mailpitSetupOnce    sync.Once
 	mailpitSSLSetupOnce sync.Once
-	mailpitSetupErr    error
-	mailpitSSLSetupErr error
-	testTLSCertDir     string
+	mailpitSetupErr     error
+	mailpitSSLSetupErr  error
+	testTLSCertDir      string
 )
 
 // isWSL returns true if running via WSL docker (higher latency expected)
@@ -74,17 +91,25 @@ func isWSL() bool {
 // containerTimeout returns appropriate timeout based on environment
 func containerTimeout() time.Duration {
 	if isWSL() {
-		return 30 * time.Second // WSL + Docker has higher latency
+		return wslContainerTimeout
 	}
-	return 15 * time.Second
+	return nativeContainerTimeout
 }
 
 // dialTimeout returns appropriate dial timeout based on environment
 func dialTimeout() time.Duration {
 	if isWSL() {
-		return 500 * time.Millisecond
+		return wslDialTimeout
 	}
-	return 100 * time.Millisecond
+	return nativeDialTimeout
+}
+
+// messageWait returns appropriate wait time for message processing
+func messageWait() time.Duration {
+	if isWSL() {
+		return wslMessageWait
+	}
+	return nativeMessageWait
 }
 
 // TestMain provides one-time setup and teardown for the integration test suite.
@@ -278,7 +303,7 @@ func ensureMailpitSSLContainer() error {
 	if _, err := runDockerCmd("image", "inspect", imageName); err != nil {
 		// Image doesn't exist, pull it
 		if _, err := runDockerCmd("pull", imageName); err != nil {
-			return fmt.Errorf("failed to pull mailpit image: %w", err)
+			return fmt.Errorf("failed to pull mailpit image for SSL container: %w", err)
 		}
 	}
 
@@ -505,7 +530,7 @@ func runDockerCmd(args ...string) ([]byte, error) {
 	defer cancel()
 
 	if runtime.GOOS == "windows" {
-		wslArgs := append([]string{"docker"}, args...)
+		wslArgs := append([]string{"--cd", "/tmp", "docker"}, args...)
 		cmd := exec.CommandContext(ctx, "wsl", wslArgs...)
 		out, err := cmd.CombinedOutput()
 		if err == nil {
@@ -581,8 +606,8 @@ func getMailpitMessages(t *testing.T) []MailpitMessage {
 	if !useMailpit {
 		return nil
 	}
-	// Wait a bit for message to be processed
-	time.Sleep(200 * time.Millisecond)
+	// Wait for message to be processed
+	time.Sleep(messageWait())
 
 	resp, err := http.Get(mailpitAPI + "/v1/messages")
 	if err != nil {
@@ -2208,9 +2233,10 @@ func setupOAuth2Mock(t *testing.T) bool {
 
 	oauth2SetupOnce.Do(func() {
 		addr := fmt.Sprintf("%s:%d", smtpHost, oauth2MockPort)
+		dialTO := dialTimeout()
 
 		// Check if already running
-		if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
+		if conn, err := net.DialTimeout("tcp", addr, dialTO); err == nil {
 			conn.Close()
 			oauth2Ready = true
 			t.Logf("OAuth2 mock server already running on %s", addr)
@@ -2240,9 +2266,9 @@ func setupOAuth2Mock(t *testing.T) bool {
 		}
 
 		// Wait for container readiness
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(containerTimeout())
 		for time.Now().Before(deadline) {
-			if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
+			if conn, err := net.DialTimeout("tcp", addr, dialTO); err == nil {
 				conn.Close()
 				oauth2Ready = true
 				t.Logf("OAuth2 mock server ready on %s", addr)
@@ -3790,14 +3816,16 @@ func TestLive_JSONListFormat(t *testing.T) {
 		}
 
 		// Verify via Mailpit
-		time.Sleep(200 * time.Millisecond)
-		messages := getMailpitMessages(t)
-		if len(messages) == 0 {
-			t.Error("no messages received")
-		} else {
-			msg := getMailpitMessageDetails(t, messages[0].ID)
-			if msg != nil && len(msg.To) != 2 {
-				t.Errorf("expected 2 To recipients, got %d", len(msg.To))
+		if useMailpit {
+			time.Sleep(messageWait())
+			messages := getMailpitMessages(t)
+			if len(messages) == 0 {
+				t.Error("no messages received")
+			} else {
+				msg := getMailpitMessageDetails(t, messages[0].ID)
+				if msg != nil && len(msg.To) != 2 {
+					t.Errorf("expected 2 To recipients, got %d", len(msg.To))
+				}
 			}
 		}
 	})
@@ -3904,14 +3932,16 @@ func TestLive_JSONListFormat(t *testing.T) {
 		}
 
 		// Verify attachments via Mailpit
-		time.Sleep(200 * time.Millisecond)
-		messages := getMailpitMessages(t)
-		if len(messages) == 0 {
-			t.Error("no messages received")
-		} else {
-			msg := getMailpitMessageDetails(t, messages[0].ID)
-			if msg != nil && msg.Attachments != 2 {
-				t.Errorf("expected 2 attachments, got %d", msg.Attachments)
+		if useMailpit {
+			time.Sleep(messageWait())
+			messages := getMailpitMessages(t)
+			if len(messages) == 0 {
+				t.Error("no messages received")
+			} else {
+				msg := getMailpitMessageDetails(t, messages[0].ID)
+				if msg != nil && msg.Attachments != 2 {
+					t.Errorf("expected 2 attachments, got %d", msg.Attachments)
+				}
 			}
 		}
 	})
@@ -3935,4 +3965,468 @@ func TestLive_JSONListFormat(t *testing.T) {
 			t.Errorf("expected 2 recipients, got %d", len(recipients))
 		}
 	})
+}
+
+// Helper to retrieve raw message bytes from Mailpit API
+func getMailpitRawMessage(t *testing.T, id string) []byte {
+	t.Helper()
+	if !useMailpit {
+		return nil
+	}
+	resp, err := http.Get(mailpitAPI + "/v1/message/" + id + "/raw")
+	if err != nil {
+		t.Logf("Warning: Failed to get raw message: %v", err)
+		return nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return body
+}
+
+func generateTestCertHelper(t *testing.T, email string, keyUsage x509.KeyUsage, validDays int) (*rsa.PrivateKey, *x509.Certificate, []byte, []byte) {
+	t.Helper()
+	privKey, err := rsa.GenerateKey(crand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate RSA key: %v", err)
+	}
+
+	notBefore := time.Now().Add(-1 * time.Hour)
+	notAfter := notBefore.Add(time.Duration(validDays) * 24 * time.Hour)
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject: pkix.Name{
+			CommonName:   email,
+			Organization: []string{"mailxgo Integration Test"},
+		},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              keyUsage,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageEmailProtection},
+		BasicConstraintsValid: true,
+		EmailAddresses:        []string{email},
+	}
+
+	certBytes, err := x509.CreateCertificate(crand.Reader, template, template, &privKey.PublicKey, privKey)
+	if err != nil {
+		t.Fatalf("failed to create certificate: %v", err)
+	}
+
+	cert, err := x509.ParseCertificate(certBytes)
+	if err != nil {
+		t.Fatalf("failed to parse certificate: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certBytes})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privKey)})
+
+	return privKey, cert, certPEM, keyPEM
+}
+
+func extractPKCS7FromEML(eml []byte) []byte {
+	idx := bytes.Index(eml, []byte("\r\n\r\n"))
+	if idx == -1 {
+		idx = bytes.Index(eml, []byte("\n\n"))
+		if idx == -1 {
+			return eml
+		}
+		idx += 2
+	} else {
+		idx += 4
+	}
+	body := eml[idx:]
+	sBody := string(body)
+	sBody = strings.ReplaceAll(sBody, "=\r\n", "")
+	sBody = strings.ReplaceAll(sBody, "=\n", "")
+	sBody = strings.ReplaceAll(sBody, "=3D", "=")
+	sBody = strings.ReplaceAll(sBody, "\r", "")
+	sBody = strings.ReplaceAll(sBody, "\n", "")
+
+	if decoded, err := base64.StdEncoding.DecodeString(sBody); err == nil {
+		return decoded
+	}
+	return body
+}
+
+// =============================================================================
+// E2E TEST: S/MIME Digital Signing (Live Mailpit Container Test)
+// =============================================================================
+func TestLive_SMIMESign(t *testing.T) {
+	server := setupMailpit(t)
+	clearMailpit(t)
+	if server != nil {
+		defer server.listener.Close()
+	}
+
+	tempDir := t.TempDir()
+	_, _, certPEM, keyPEM := generateTestCertHelper(t, "smime-signer@example.com", x509.KeyUsageDigitalSignature, 365)
+	certPath := filepath.Join(tempDir, "signer.pem")
+	keyPath := filepath.Join(tempDir, "signer.key")
+	_ = os.WriteFile(certPath, certPEM, 0o600)
+	_ = os.WriteFile(keyPath, keyPEM, 0o600)
+
+	params := mailxgo.EmailParams{
+		SMTPServer: smtpHost,
+		SMTPPort:   smtpPort,
+		From:       "smime-signer@example.com",
+		To:         []string{"smime-recipient@example.com"},
+		Subject:    "S/MIME Live Signed Message",
+		Body:       "This email is digitally signed with S/MIME.",
+		TLSMode:    "none",
+		NoAuth:     true,
+		SMIMESign:  true,
+		SMIMECert:  certPath,
+		SMIMEKey:   keyPath,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("SendEmail S/MIME sign failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Fatalf("expected status success, got %s", res.Status)
+	}
+
+	if useMailpit {
+		msgs := getMailpitMessages(t)
+		if len(msgs) == 0 {
+			t.Fatal("No S/MIME signed messages received by Mailpit")
+		}
+		msg := msgs[0]
+		if msg.Subject != "S/MIME Live Signed Message" {
+			t.Errorf("Subject mismatch: got %s", msg.Subject)
+		}
+		rawEML := getMailpitRawMessage(t, msg.ID)
+		if len(rawEML) == 0 {
+			t.Error("raw EML payload from Mailpit is empty")
+		}
+	}
+}
+
+// =============================================================================
+// E2E TEST: S/MIME Payload Encryption & Decryption (Live Mailpit Container Test)
+// =============================================================================
+func TestLive_SMIMEEncrypt(t *testing.T) {
+	server := setupMailpit(t)
+	clearMailpit(t)
+	if server != nil {
+		defer server.listener.Close()
+	}
+
+	tempDir := t.TempDir()
+	recipientKey, recipientCert, recipientCertPEM, _ := generateTestCertHelper(t, "smime-recipient@example.com", x509.KeyUsageKeyEncipherment, 365)
+	certPath := filepath.Join(tempDir, "recipient.pem")
+	_ = os.WriteFile(certPath, recipientCertPEM, 0o600)
+
+	secretPayload := "CONFIDENTIAL-LIVE-MFT-TRANSFER-PAYLOAD-2026"
+	params := mailxgo.EmailParams{
+		SMTPServer:          smtpHost,
+		SMTPPort:            smtpPort,
+		From:                "smime-sender@example.com",
+		To:                  []string{"smime-recipient@example.com"},
+		Subject:             "S/MIME Live Encrypted Message",
+		Body:                secretPayload,
+		TLSMode:             "none",
+		NoAuth:              true,
+		SMIMEEncrypt:        true,
+		SMIMERecipientCerts: []string{certPath},
+		SMIMEAlgorithm:      "aes-256-gcm",
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("SendEmail S/MIME encrypt failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Fatalf("expected status success, got %s", res.Status)
+	}
+
+	if useMailpit {
+		msgs := getMailpitMessages(t)
+		if len(msgs) == 0 {
+			t.Fatal("No S/MIME encrypted messages received by Mailpit")
+		}
+		msg := msgs[0]
+		rawEML := getMailpitRawMessage(t, msg.ID)
+		if len(rawEML) == 0 {
+			t.Fatal("raw EML payload from Mailpit is empty")
+		}
+
+		// Verify raw EML does NOT contain unencrypted secret
+		if bytes.Contains(rawEML, []byte(secretPayload)) {
+			t.Error("SECURITY BREACH: raw EML contains unencrypted secret payload!")
+		}
+
+		// Parse and Decrypt PKCS#7 envelope from Mailpit EML
+		p7, err := pkcs7.Parse(extractPKCS7FromEML(rawEML))
+		if err != nil {
+			t.Fatalf("failed to parse PKCS#7 envelope from Mailpit EML: %v", err)
+		}
+		decrypted, err := p7.Decrypt(recipientCert, recipientKey)
+		if err != nil {
+			t.Fatalf("failed to decrypt PKCS#7 envelope from Mailpit EML: %v", err)
+		}
+
+		if !bytes.Contains(decrypted, []byte(secretPayload)) {
+			t.Errorf("decrypted Mailpit payload does not contain secret payload! Got:\n%s", string(decrypted))
+		}
+	}
+}
+
+// =============================================================================
+// E2E TEST: S/MIME Diagnostics Probe (Live Mailpit Test)
+// =============================================================================
+func TestLive_SMIMEDiagnostics(t *testing.T) {
+	server := setupMailpit(t)
+	if server != nil {
+		defer server.listener.Close()
+	}
+
+	tempDir := t.TempDir()
+	_, _, certPEM, keyPEM := generateTestCertHelper(t, "diag-live@example.com", x509.KeyUsageDigitalSignature|x509.KeyUsageKeyEncipherment, 365)
+	certPath := filepath.Join(tempDir, "diag.pem")
+	keyPath := filepath.Join(tempDir, "diag.key")
+	_ = os.WriteFile(certPath, certPEM, 0o600)
+	_ = os.WriteFile(keyPath, keyPEM, 0o600)
+
+	diagParams := mailxgo.EmailParams{
+		SMTPServer:          smtpHost,
+		SMTPPort:            smtpPort,
+		From:                "diag-live@example.com",
+		TLSMode:             "none",
+		SMIMESign:           true,
+		SMIMECert:           certPath,
+		SMIMEKey:            keyPath,
+		SMIMERecipientCerts: []string{certPath},
+	}
+
+	report, err := mailxgo.RunDiagnostics(diagParams, false)
+	if err != nil {
+		t.Fatalf("RunDiagnostics failed: %v", err)
+	}
+	if report.Status != "success" {
+		t.Errorf("expected success status, got %s", report.Status)
+	}
+	if report.SMIMEInfo == nil {
+		t.Fatal("expected non-nil SMIMEInfo in diagnostic report")
+	}
+	if !report.SMIMEInfo.SignerKeyUsageOK {
+		t.Error("SignerKeyUsageOK = false; want true")
+	}
+	if !report.SMIMEInfo.SignerKeyDecryptOK {
+		t.Error("SignerKeyDecryptOK = false; want true")
+	}
+}
+
+// =============================================================================
+// E2E TEST: S/MIME Combined Sign + Encrypt (Live Mailpit Test)
+// =============================================================================
+func TestLive_SMIMESignAndEncrypt(t *testing.T) {
+	server := setupMailpit(t)
+	clearMailpit(t)
+	if server != nil {
+		defer server.listener.Close()
+	}
+
+	tempDir := t.TempDir()
+	_, _, signerCertPEM, signerKeyPEM := generateTestCertHelper(t, "combined-signer@example.com", x509.KeyUsageDigitalSignature, 365)
+	recipientKey, recipientCert, recipientCertPEM, _ := generateTestCertHelper(t, "combined-recipient@example.com", x509.KeyUsageKeyEncipherment, 365)
+
+	signerCertPath := filepath.Join(tempDir, "signer.pem")
+	signerKeyPath := filepath.Join(tempDir, "signer.key")
+	recipientCertPath := filepath.Join(tempDir, "recipient.pem")
+
+	_ = os.WriteFile(signerCertPath, signerCertPEM, 0o600)
+	_ = os.WriteFile(signerKeyPath, signerKeyPEM, 0o600)
+	_ = os.WriteFile(recipientCertPath, recipientCertPEM, 0o600)
+
+	secretText := "COMBINED-SIGN-AND-ENCRYPT-SECRET-PAYLOAD"
+	params := mailxgo.EmailParams{
+		SMTPServer:          smtpHost,
+		SMTPPort:            smtpPort,
+		From:                "combined-signer@example.com",
+		To:                  []string{"combined-recipient@example.com"},
+		Subject:             "S/MIME Live Combined Sign+Encrypt Message",
+		Body:                secretText,
+		TLSMode:             "none",
+		NoAuth:              true,
+		SMIMESign:           true,
+		SMIMEEncrypt:        true,
+		SMIMECert:           signerCertPath,
+		SMIMEKey:            signerKeyPath,
+		SMIMERecipientCerts: []string{recipientCertPath},
+		SMIMEAlgorithm:      "aes-256-gcm",
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("SendEmail combined sign+encrypt failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Fatalf("expected status success, got %s", res.Status)
+	}
+
+	if useMailpit {
+		msgs := getMailpitMessages(t)
+		if len(msgs) == 0 {
+			t.Fatal("No messages received by Mailpit")
+		}
+		msg := msgs[0]
+		rawEML := getMailpitRawMessage(t, msg.ID)
+		if len(rawEML) == 0 {
+			t.Fatal("raw EML payload is empty")
+		}
+
+		if bytes.Contains(rawEML, []byte(secretText)) {
+			t.Error("SECURITY BREACH: raw EML contains unencrypted secret payload!")
+		}
+
+		p7, err := pkcs7.Parse(extractPKCS7FromEML(rawEML))
+		if err != nil {
+			t.Fatalf("failed to parse PKCS#7 envelope: %v", err)
+		}
+		decrypted, err := p7.Decrypt(recipientCert, recipientKey)
+		if err != nil {
+			t.Fatalf("failed to decrypt PKCS#7 envelope: %v", err)
+		}
+
+		if !bytes.Contains(decrypted, []byte(secretText)) {
+			t.Errorf("decrypted combined payload missing secret! Got:\n%s", string(decrypted))
+		}
+	}
+}
+
+// =============================================================================
+// E2E TEST: S/MIME Recipient Cert Directory Auto-Resolution (Live Mailpit Test)
+// =============================================================================
+func TestLive_SMIMERecipientCertDir(t *testing.T) {
+	server := setupMailpit(t)
+	clearMailpit(t)
+	if server != nil {
+		defer server.listener.Close()
+	}
+
+	tempDir := t.TempDir()
+	certDir := filepath.Join(tempDir, "certdir")
+	_ = os.MkdirAll(certDir, 0o700)
+
+	_, _, aliceCertPEM, _ := generateTestCertHelper(t, "alice@corp.local", x509.KeyUsageKeyEncipherment, 365)
+	_, _, bobCertPEM, _ := generateTestCertHelper(t, "bob@corp.local", x509.KeyUsageKeyEncipherment, 365)
+
+	_ = os.WriteFile(filepath.Join(certDir, "alice.pem"), aliceCertPEM, 0o600)
+	_ = os.WriteFile(filepath.Join(certDir, "bob.crt"), bobCertPEM, 0o600)
+
+	params := mailxgo.EmailParams{
+		SMTPServer:            smtpHost,
+		SMTPPort:              smtpPort,
+		From:                  "sender@corp.local",
+		To:                    []string{"alice@corp.local", "bob@corp.local"},
+		Subject:               "S/MIME Recipient Cert Dir Auto-Resolution Test",
+		Body:                  "Encrypted payload using recipient cert directory resolution.",
+		TLSMode:               "none",
+		NoAuth:                true,
+		SMIMEEncrypt:          true,
+		SMIMERecipientCertDir: certDir,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("SendEmail with recipient cert directory failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Fatalf("expected status success, got %s", res.Status)
+	}
+}
+
+// =============================================================================
+// E2E TEST: ESMTP SIZE Probe (Live Mailpit Test)
+// =============================================================================
+func TestLive_ProbeESMTPSize(t *testing.T) {
+	server := setupMailpit(t)
+	if server != nil {
+		defer server.listener.Close()
+	}
+
+	// Test SIZE probe against live Mailpit
+	size, err := mailxgo.ProbeESMTPSize(smtpHost, smtpPort, "none")
+	if err != nil {
+		t.Fatalf("ProbeESMTPSize failed: %v", err)
+	}
+
+	// Mailpit may or may not advertise SIZE - just verify no error
+	t.Logf("Mailpit SIZE limit: %d bytes (0 = not advertised)", size)
+}
+
+// =============================================================================
+// E2E TEST: S/MIME Default Config Credentials (Live Mailpit Test)
+// =============================================================================
+func TestLive_SMIMEDefaultConfig(t *testing.T) {
+	server := setupMailpit(t)
+	clearMailpit(t)
+	if server != nil {
+		defer server.listener.Close()
+	}
+
+	tempDir := t.TempDir()
+	_, _, certPEM, keyPEM := generateTestCertHelper(t, "default-signer@example.com", x509.KeyUsageDigitalSignature, 365)
+	defaultCertPath := filepath.Join(tempDir, "default.pem")
+	defaultKeyPath := filepath.Join(tempDir, "default.key")
+	_ = os.WriteFile(defaultCertPath, certPEM, 0o600)
+	_ = os.WriteFile(defaultKeyPath, keyPEM, 0o600)
+
+	// Create config file with smime_default_* settings
+	configPath := filepath.Join(tempDir, "config.json")
+	configJSON := fmt.Sprintf(`{
+		"smtp_server": "%s",
+		"smtp_port": %d,
+		"smime_default_cert": "%s",
+		"smime_default_key": "%s"
+	}`, smtpHost, smtpPort, filepath.ToSlash(defaultCertPath), filepath.ToSlash(defaultKeyPath))
+	_ = os.WriteFile(configPath, []byte(configJSON), 0o600)
+
+	// Load config and verify defaults are picked up
+	config, err := mailxgo.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if config.SMIMEDefaultCert == "" {
+		t.Error("SMIMEDefaultCert not loaded from config")
+	}
+	if config.SMIMEDefaultKey == "" {
+		t.Error("SMIMEDefaultKey not loaded from config")
+	}
+
+	// Test that signing works using default credentials (simulating CLI fallback)
+	params := mailxgo.EmailParams{
+		SMTPServer: smtpHost,
+		SMTPPort:   smtpPort,
+		From:       "default-signer@example.com",
+		To:         []string{"recipient@example.com"},
+		Subject:    "S/MIME Default Config Test",
+		Body:       "This email uses default S/MIME credentials from config.",
+		TLSMode:    "none",
+		NoAuth:     true,
+		SMIMESign:  true,
+		SMIMECert:  config.SMIMEDefaultCert, // Simulates CLI fallback
+		SMIMEKey:   config.SMIMEDefaultKey,
+	}
+
+	res, err := mailxgo.SendEmail(params)
+	if err != nil {
+		t.Fatalf("SendEmail with default S/MIME config failed: %v", err)
+	}
+	if res.Status != "success" {
+		t.Fatalf("expected status success, got %s", res.Status)
+	}
+
+	if useMailpit {
+		msgs := getMailpitMessages(t)
+		if len(msgs) == 0 {
+			t.Fatal("No messages received by Mailpit")
+		}
+		if msgs[0].Subject != "S/MIME Default Config Test" {
+			t.Errorf("Subject mismatch: got %s", msgs[0].Subject)
+		}
+	}
 }

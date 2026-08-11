@@ -81,95 +81,145 @@ sequenceDiagram
 
 ## 4. Test Catalog & Matrix
 
-| Logical Group | Test Name | Technical Purpose / Description | Success Criteria |
-| :--- | :--- | :--- | :--- |
-| **CLI & Parsing** | `TestHeaderFlags` | Validates multi-value `-H` header flag parsing, format validation, and CRLF injection detection. | PASS on valid `Key: Value`; FAIL on missing colon, empty key, or CRLF. |
-| **CLI & Parsing** | `TestPrintUsage` | Asserts `PrintUsage()` renders help menu text to `os.Stderr` without panicking. | PASS on clean execution without panic. |
-| **CLI & Parsing** | `TestPriorityHelpers` | Verifies low-to-high precedence resolution functions (`priorityString`, `priorityInt`). | PASS when returning the last non-empty or non-zero slice element. |
-| **CLI & Parsing** | `TestRunCLI_Version` | Verifies `-v` and `--version` flags output version string and exit cleanly. | PASS on exit code `ExitSuccess` (`0`). |
-| **CLI & Parsing** | `TestRunCLI_ParseError` | Asserts unknown flags trigger usage output and return error status. | PASS on trapped exit code `ExitErrUsage` (`2`). |
-| **CLI & Parsing** | `TestRunCLI_MissingRequiredArgs` | Asserts missing mandatory parameters (`--smtp-server`, `--from-email`, etc.) fail validation. | PASS on trapped exit code `ExitErrUsage` (`2`). |
-| **CLI & Parsing** | `TestRunCLI_ConfigAndPresets` | Verifies JSON config file loading and corrupt JSON handling. | PASS on exit code `0` for valid config; `ExitErrConfig` (`3`) for malformed JSON. |
-| **CLI & Parsing** | `TestRunCLI_PrecedenceOrder` | Verifies parameter evaluation precedence hierarchy (`CLI > Env > Config`). | PASS when environment variables override config file values. |
-| **CLI & Parsing** | `TestRunCLI_Diagnostics` | Verifies `-info` pre-flight diagnostic flag execution and missing server validation. | PASS on exit code `ExitSuccess` (`0`) on success; `ExitErrUsage` (`2`) or `ExitErrDNS` (`5`) on error. |
-| **CLI & Parsing** | `TestRunCLI_FullDispatch` | Verifies full CLI execution flow including list files, attachments, headers, DSN, and log files. | PASS on exit code `ExitSuccess` (`0`); `ExitErrFileIO` (`4`) on missing files. |
-| **Config & Presets** | `TestResolveProviderPreset` | Tests resolution of mail provider preset aliases (`office365`, `googleworkspace`, `aws-ses`, `protonmail`). | PASS on exact host, port, and TLS mode match for known aliases; `false` for unknown. |
-| **Config & Presets** | `TestLoadConfig` | Tests JSON configuration file unmarshaling from disk. | PASS on struct population; error on non-existent file or malformed syntax. |
-| **Diagnostics** | `TestGetTLSVersionAndCipherSuiteStrings` | Tests human-readable string mapping for TLS protocol versions and cipher suite IDs. | PASS when returning valid strings (e.g., `TLS 1.3`, `TLS_AES_128_GCM_SHA256`). |
-| **Diagnostics** | `TestRunDiagnostics_TCPDialError` | Verifies pre-flight probe handling when target TCP socket connection is refused. | PASS when returning non-nil error and status `"error"`. |
-| **Diagnostics** | `TestRunDiagnostics_OutputModes` | Verifies output formatting across text, indented JSON, and single-line NDJSON modes. | PASS when rendering valid JSON/NDJSON payloads matching schema. |
-| **Diagnostics** | `TestRunDiagnostics_Port465_HandshakeFailure` | Tests implicit TLS handshake failure handling on SMTPS port 465. | PASS when trapping handshake error and populating diagnostic report error. |
-| **Diagnostics** | `TestRunDiagnostics_SMTPClientInitFailure` | Tests ESMTP banner parsing and initial EHLO error handling. | PASS when capturing banner initialization failure. |
-| **Mailer Engine** | `TestSendEmail_Success` | Tests successful email composition and dispatch via mock client factory. | PASS when returning status `"success"` and attempts count `1`. |
-| **Mailer Engine** | `TestSendEmail_ValidationErrors` | Asserts validation failure when recipient lists are empty or invalid. | PASS on error when `To` recipient list is empty. |
-| **Mailer Engine** | `TestSendEmail_BodyFile` | Tests reading HTML body content from file path (`BodyFile`). | PASS on successful file read and setting `TypeTextHTML` MIME body. |
-| **Mailer Engine** | `TestSendEmail_MaxAttachmentMB` | Tests total attachment payload size limit guard. | PASS when execution aborts prior to dialing if payload > limit. |
-| **Mailer Engine** | `TestSendEmail_ClientCreationErrorAndRetries` | Tests retry backoff loop (`Retries`, `RetryDelay`) and failure audit logging. | PASS when attempts count equals `1 + Retries` and error is returned. |
-| **Mailer Engine** | `TestSendEmail_DialAndSendError` | Tests error propagation when `c.DialAndSend()` fails. | PASS on capturing transmission error. |
-| **Mailer Engine** | `TestSendEmail_AdvancedOptions` | Tests DSN options, Importance header setting, and custom headers. | PASS on correct option setting and header injection filtering. |
-| **Mailer Engine** | `TestOutputJSONResult` | Verifies rendering of dispatch results in text, JSON, and NDJSON formats. | PASS on clean output formatting matching specification. |
-| **Utilities** | `TestCleanEmailList` | Tests trimming whitespace and removing empty entries from email address slices. | PASS on returning cleaned slice with empty elements removed. |
-| **Utilities** | `TestLoadRecipientList` | Tests file reading of recipient addresses with CRLF/LF trimming and comment filtering. | PASS on returning valid recipient addresses; skipping `#` comment lines. |
-| **Utilities** | `TestLoadAttachmentList` | Tests file reading of attachment paths with CRLF/LF trimming and comment filtering. | PASS on returning valid file paths; skipping `#` comment lines. |
-| **Utilities** | `TestScanAttachmentDir` | Tests directory scanning (`os.ReadDir`) for regular files. | PASS on returning full file paths for non-directory files. |
-| **Integration** | `TestLive_BasicEmail` | Basic email send via Mailpit or fallback ESMTP server. | PASS on `status: success` and Mailpit API verification of subject/from. |
-| **Integration** | `TestLive_FullFeaturedEmail` | Comprehensive test of ALL `EmailParams` fields including attachments, headers, DSN, importance, context, and audit logging. | PASS on all fields verified via Mailpit API (From, To, CC, ReplyTo, attachments, custom headers). |
-| **Integration** | `TestLive_Authentication` | SASL authentication test for `plain`, `login`, and `auto` auth types. | PASS on successful send with each auth type. |
-| **Integration** | `TestLive_ListsAndDirectories` | Tests `LoadRecipientList`, `LoadAttachmentList`, and `ScanAttachmentDir` with live send. | PASS on correct recipient count (4) and attachment count (4) via Mailpit API. |
-| **Integration** | `TestLive_MaxAttachmentSize` | Tests attachment size guard rejection and acceptance. | PASS on error for oversized attachment; success when within limit. |
-| **Integration** | `TestLive_PrivacyNoLogRecipients` | Tests `--no-log-recipients` GDPR privacy flag. | PASS on log containing `[N recipients redacted]` and NOT containing actual email addresses. |
-| **Integration** | `TestLive_ContextCancellation` | Tests `context.Context` cancellation during send with retries. | PASS on detecting context cancellation. |
-| **Integration** | `TestLive_RetryMechanism` | Tests retry loop execution with successful server. | PASS on `status: success` with attempts count. |
-| **Integration** | `TestLive_Diagnostics` | Tests `RunDiagnostics` pre-flight gateway probe. | PASS on `status: success` with positive TCP/EHLO latency metrics. |
-| **Integration** | `TestLive_OutputFormats` | Tests `--json-output` and `--ndjson-output` formatting modes. | PASS on successful send in all three output modes. |
-| **Integration** | `TestLive_ImportanceLevels` | Tests `--importance` flag with `high`, `normal`, `low` values. | PASS on successful send with each importance level. |
-| **Integration** | `TestLive_CLIBinary` | End-to-end CLI binary execution via `go run ./cmd/mailxgo`. | PASS on JSON output with `status: success`, diagnostics, and version output. |
-| **Integration** | `TestLive_EmailValidation` | Tests email address validation rejection for invalid formats. | PASS on error containing `invalid` for malformed addresses. |
-| **Integration** | `TestLive_ConfigFileAllOptions` | Tests comprehensive JSON config file with all options. | PASS on config load and CLI send with config file. |
-| **Integration** | `TestLive_ErrorClassification` | Tests `ClassifyError()` for TLS, Auth, Connection, and Send error types. | PASS on correct `ErrorType` classification for each error pattern. |
-| **Utilities** | `TestValidateEmail` | Tests RFC 5322 email address format validation. | PASS on valid formats; error on empty, missing @, missing domain, invalid chars. |
-| **Utilities** | `TestValidateEmailList` | Tests batch email list validation. | PASS on valid list; error if any address is invalid. |
-| **Utilities** | `TestValidateFilePath` | Tests absolute path enforcement and path traversal detection. | PASS on Unix `/path`, Windows `C:\path`, `D:/path`; error on relative paths and `..` traversal. |
-| **Utilities** | `TestDecryptSecret` | Tests secretprotector integration for encrypted secrets. | PASS on plain secrets unchanged; error on encrypted secrets without master key. |
-| **Mailer Engine** | `TestClassifyError` | Tests error type classification (TLS, Auth, Connection, Send). | PASS on correct `ErrorType` for each error pattern. |
-| **Mailer Engine** | `TestSendEmail_NoLogRecipients` | Tests privacy flag redacting recipients from audit log. | PASS on log containing redacted count, not actual addresses. |
-| **Secretprotector** | `TestLive_SecretprotectorEncryptedPassword` | E2E test of AES-256-GCM encrypted credentials via secretprotector. Subtests: PlainPassword, EncryptedPassword_NoMasterKey, EncryptedPassword_WithMasterKey, EncryptedOAuth2Token. | PASS on plain password send; error on encrypted without key; success on encrypted with key; success on encrypted OAuth2 token. |
-| **Secretprotector** | `TestLive_CLI_SecretprotectorCredentials` | CLI E2E test with encrypted password in JSON config file. | PASS on CLI send with `SECRETPROTECTOR_MASTER_KEY` env var and Mailpit verification. |
-| **Crypto** | `TestNormalizeFingerprint` | Tests fingerprint normalization (remove colons, uppercase). | PASS on all normalization cases. |
-| **Crypto** | `TestFormatFingerprint` | Tests fingerprint formatting with colons. | PASS on AA:BB:CC:DD format output. |
-| **Crypto** | `TestValidateCertFingerprint` | Tests SHA256 fingerprint validation (64 hex chars). | PASS on valid fingerprints; error on invalid length/chars. |
-| **Crypto** | `TestComputeCertFingerprint` | Tests SHA256 computation from DER certificate. | PASS on deterministic 64-char uppercase hex output. |
-| **Crypto** | `TestLoadCustomCACerts_SingleFile` | Tests loading CA cert from PEM file. | PASS on valid cert pool creation. |
-| **Crypto** | `TestLoadCustomCACerts_Directory` | Tests loading CA certs from directory (.pem, .crt, .cer). | PASS on loading multiple certs, ignoring non-cert files. |
-| **Crypto** | `TestLoadCustomCACerts_InvalidFile` | Tests error handling for missing/invalid PEM files. | PASS on appropriate error messages. |
-| **Crypto** | `TestLoadCustomCACerts_RelativePath` | Tests rejection of relative paths (security). | PASS on error for relative paths. |
-| **Crypto** | `TestCreateFingerprintVerifier` | Tests TLS fingerprint pinning verifier function. | PASS on matching fingerprint; error on mismatch. |
-| **Integration** | `TestLive_TLSModes` | E2E test of TLS modes (`none`, `ignore-trust`). | PASS on successful send with each TLS mode. |
-| **Integration** | `TestLive_TLSCACert` | E2E test of `--tls-ca-cert` CA certificate loading. | PASS on loading PEM cert and successful send. |
-| **Integration** | `TestLive_TLSCADir` | E2E test of `--tls-ca-dir` CA directory loading. | PASS on loading .pem/.crt/.cer files from directory. |
-| **Integration** | `TestLive_TLSFingerprintValidation` | E2E test of fingerprint format validation. | PASS on valid fingerprints; error on invalid format. |
-| **Integration** | `TestLive_DiagnosticsWithTLSOptions` | E2E test of diagnostics with TLS options. | PASS on diagnostics with `ignore-trust` and CA cert. |
-| **Integration** | `TestLive_CLI_TLSOptions` | E2E test of CLI with TLS config options. | PASS on CLI send with TLS mode in config file. |
-| **Integration** | `TestLive_DiagnosticsSTARTTLS` | E2E test of STARTTLS TLS upgrade with Mailpit. Subtests: STARTTLS_IgnoreTrust (verify TLS version, cipher, cert info), STARTTLS_PrintCerts (verify certificate chain output). | PASS on `status: success` with TLS 1.3, valid cipher suite, certificate subject/issuer, and TLS handshake latency > 0. |
-| **Integration** | `TestLive_ImplicitTLS_Port465` | E2E test of implicit TLS (SMTPS) with SSL-only Mailpit container. Subtests: SendEmail_ImplicitTLS (send via `tls-direct` mode), Diagnostics_ImplicitTLS (diagnostics with implicit TLS), TLSHandshakeLatency_ImplicitTLS (verify TLS metrics). | PASS on successful send/diagnostics with TLS 1.3, STARTTLS=false (implicit TLS), and TLS handshake latency > 0. |
-| **OAuth2** | `TestLive_OAuth2_XOAUTH2Authentication` | E2E test of XOAUTH2 authentication via OAuth2 mock server. Subtests: XOAUTH2_ValidToken, XOAUTH2_TestToken, XOAUTH2_EncryptedToken, CLI_OAuth2. | PASS on successful XOAUTH2 auth with valid tokens, test tokens, encrypted tokens, and CLI flags. |
-| **Mailer Engine** | `TestSendEmail_MaxRecipients` | Tests `--max-recipients` limit guard for memory protection. | PASS on error when recipients exceed limit; success when within limit. |
-| **Mailer Engine** | `TestSendEmail_SingleRecipient` | Tests `--single-recipient` batch mode with rate limiting. | PASS on individual email per recipient with proper rate limiting. |
-| **Integration** | `TestLive_MaxRecipients` | E2E test of `--max-recipients` limit with live SMTP server. | PASS on rejection when exceeding limit; success when within limit. |
-| **Integration** | `TestLive_SingleRecipient` | E2E test of `--single-recipient` batch mode via Mailpit. | PASS on N separate emails for N recipients, each verified via Mailpit API. |
-| **Integration** | `TestLive_RunDiagnostics` | E2E test of `RunDiagnostics` with live Mailpit SMTP server. Subtests: basic diagnostics, capabilities, DNS info, JSON/NDJSON output, connection failure. | PASS on `status: success` with TCP/EHLO latency metrics; `status: error` for invalid port. |
-| **Integration** | `TestLive_OutputDiagReport` | E2E test of `OutputDiagReport` output modes with live diagnostic data. | PASS on text, JSON, NDJSON, and text+certs output modes. |
-| **Crypto** | `TestBuildTLSConfig` | Tests TLS config builder with all options. Subtests: default, ignore-trust, CA cert file, CA dir, fingerprint pinning, invalid CA, combined options. | PASS on correct TLS config for each scenario. |
-| **Mailer Engine** | `TestNoAuthSASL` | Tests `noAuthSASL` SASL implementation `Start()` and `Next()` methods. | PASS on correct PLAIN mechanism and anonymous credentials. |
-| **Mailer Engine** | `TestSendEmail_NoAuthMode` | Tests `--auth-type noauth` for unauthenticated relays. | PASS on successful send without authentication. |
-| **Mailer Engine** | `TestSendEmail_XOAUTH2Mode` | Tests `--auth-type xoauth2` OAuth2 authentication mode. | PASS on successful send with XOAUTH2 auth type. |
-| **Mailer Engine** | `TestSendEmail_CramMD5Mode` | Tests `--auth-type cram-md5` CRAM-MD5 authentication mode. | PASS on successful send with CRAM-MD5 auth type. |
-| **Mailer Engine** | `TestClassifyError_AllTypes` | Comprehensive error classification test for all error types (TLS, Auth, Connection, Send). | PASS on correct `ErrorType` for each error pattern. |
-| **Utilities** | `TestLoadRecipientListJSON` | Tests JSON parsing of recipient lists. Subtests: simple array, object array with vars, empty array, invalid email, invalid JSON, missing email field, whitespace trimming. | PASS on correct parsing and validation for all JSON formats. |
-| **Utilities** | `TestLoadAttachmentListJSON` | Tests JSON parsing of attachment lists. Subtests: valid array, empty array, invalid path, invalid JSON, skip empty strings. | PASS on correct parsing and path validation. |
-| **Utilities** | `TestLoadList` | Tests unified list loader with format selection. Subtests: text recipients, json recipients, default format, invalid format, text attachments, json attachments. | PASS on correct format dispatch and parsing. |
-| **Integration** | `TestLive_JSONListFormat` | E2E test of `--list-format json` with Mailpit. Subtests: JSON recipient list, JSON with vars, JSON attachment list, text format fallback. | PASS on successful send with JSON-parsed recipients and attachments. |
-| **CLI Binary** | `TestMainCompiles` | Asserts `cmd/mailxgo` package compiles without errors. | PASS on clean compilation. |
+### 4.1 CLI & Parameter Parsing Tests
+| Test Name | Technical Purpose / Description | Success Criteria |
+| :--- | :--- | :--- |
+| `TestHeaderFlags` | Validates multi-value `-H` header flag parsing, format validation, and CRLF injection detection. | PASS on valid `Key: Value`; FAIL on missing colon, empty key, or CRLF. |
+| `TestPrintUsage` | Asserts `PrintUsage()` renders help menu text to `os.Stderr` without panicking. | PASS on clean execution without panic. |
+| `TestPriorityHelpers` | Verifies low-to-high precedence resolution functions (`priorityString`, `priorityInt`). | PASS when returning the last non-empty or non-zero slice element. |
+| `TestRunCLI_Version` | Verifies `-v` and `--version` flags output version string and exit cleanly. | PASS on exit code `ExitSuccess` (`0`). |
+| `TestRunCLI_ParseError` | Asserts unknown flags trigger usage output and return error status. | PASS on trapped exit code `ExitErrUsage` (`2`). |
+| `TestRunCLI_MissingRequiredArgs` | Asserts missing mandatory parameters (`--smtp-server`, `--from-email`, etc.) fail validation. | PASS on trapped exit code `ExitErrUsage` (`2`). |
+| `TestRunCLI_ConfigAndPresets` | Verifies JSON config file loading and corrupt JSON handling. | PASS on exit code `0` for valid config; `ExitErrConfig` (`3`) for malformed JSON. |
+| `TestRunCLI_PrecedenceOrder` | Verifies parameter evaluation precedence hierarchy (`CLI > Env > Config`). | PASS when environment variables override config file values. |
+| `TestRunCLI_Diagnostics` | Verifies `-info` pre-flight diagnostic flag execution and missing server validation. | PASS on exit code `ExitSuccess` (`0`) on success; `ExitErrUsage` (`2`) or `ExitErrDNS` (`5`) on error. |
+| `TestRunCLI_FullDispatch` | Verifies full CLI execution flow including list files, attachments, headers, DSN, and log files. | PASS on exit code `ExitSuccess` (`0`); `ExitErrFileIO` (`4`) on missing files. |
+
+### 4.2 Config & Provider Preset Tests
+| Test Name | Technical Purpose / Description | Success Criteria |
+| :--- | :--- | :--- |
+| `TestResolveProviderPreset` | Tests resolution of mail provider preset aliases (`office365`, `googleworkspace`, `aws-ses`, `protonmail`). | PASS on exact host, port, and TLS mode match for known aliases; `false` for unknown. |
+| `TestLoadConfig` | Tests JSON configuration file unmarshaling from disk. | PASS on struct population; error on non-existent file or malformed syntax. |
+
+### 4.3 Mailer Engine & Dispatch Tests
+| Test Name | Technical Purpose / Description | Success Criteria |
+| :--- | :--- | :--- |
+| `TestSendEmail_Success` | Tests successful email composition and dispatch via mock client factory. | PASS when returning status `"success"` and attempts count `1`. |
+| `TestSendEmail_ValidationErrors` | Asserts validation failure when recipient lists are empty or invalid. | PASS on error when `To` recipient list is empty. |
+| `TestSendEmail_BodyFile` | Tests reading HTML body content from file path (`BodyFile`). | PASS on successful file read and setting `TypeTextHTML` MIME body. |
+| `TestSendEmail_MaxAttachmentMB` | Tests total attachment payload size limit guard. | PASS when execution aborts prior to dialing if payload > limit. |
+| `TestSendEmail_MaxRecipients` | Tests `--max-recipients` limit guard for memory protection. | PASS on error when recipients exceed limit; success when within limit. |
+| `TestSendEmail_SingleRecipient` | Tests `--single-recipient` batch mode with rate limiting. | PASS on individual email per recipient with proper rate limiting. |
+| `TestSendEmail_NoAuthMode` | Tests `--auth-type noauth` for unauthenticated relays. | PASS on successful send without authentication. |
+| `TestSendEmail_XOAUTH2Mode` | Tests `--auth-type xoauth2` OAuth2 authentication mode. | PASS on successful send with XOAUTH2 auth type. |
+| `TestSendEmail_CramMD5Mode` | Tests `--auth-type cram-md5` CRAM-MD5 authentication mode. | PASS on successful send with CRAM-MD5 auth type. |
+| `TestSendEmail_NoLogRecipients` | Tests privacy flag redacting recipients from audit log. | PASS on log containing redacted count, not actual addresses. |
+| `TestSendEmail_ClientCreationErrorAndRetries` | Tests retry backoff loop (`Retries`, `RetryDelay`) and failure audit logging. | PASS when attempts count equals `1 + Retries` and error is returned. |
+| `TestSendEmail_DialAndSendError` | Tests error propagation when `c.DialAndSend()` fails. | PASS on capturing transmission error. |
+| `TestSendEmail_AdvancedOptions` | Tests DSN options, Importance header setting, and custom headers. | PASS on correct option setting and header injection filtering. |
+| `TestNoAuthSASL` | Tests `noAuthSASL` SASL implementation `Start()` and `Next()` methods. | PASS on correct PLAIN mechanism and anonymous credentials. |
+| `TestClassifyError` / `TestClassifyError_AllTypes` | Comprehensive error classification test for all error types (TLS, Auth, Connection, Send). | PASS on correct `ErrorType` for each error pattern. |
+| `TestOutputJSONResult` | Verifies rendering of dispatch results in text, JSON, and NDJSON formats. | PASS on clean output formatting matching specification. |
+
+### 4.4 S/MIME Encryption & Digital Signing Tests
+| Test Name | Technical Purpose / Description | Success Criteria |
+| :--- | :--- | :--- |
+| `TestEstimateEncryptedSize` | Calculates Base64 and PKCS#7 envelope size expansion factor ($1.37\times$). | PASS on accurate size overhead prediction. |
+| `TestLoadCertificateAndKey` | Validates loading PEM-encoded X.509 certificates and RSA private keys. | PASS on correct struct parsing and subject CommonName matching. |
+| `TestLoadPKCS12` | Tests enterprise PKCS#12 bundle (`.pfx`/`.p12`) decoding and intermediate CA extraction. | PASS on cert/key extraction; error on bad passphrase or corrupt file. |
+| `TestLoadCertificatesFromDir` | Tests directory scanning and file extension filtering (`.pem`, `.crt`, `.cer`). | PASS on loading valid cert files and skipping non-cert entries. |
+| `TestBuildCertIndexAndResolve` | Tests building recipient cert lookup map indexed by SAN email addresses and `mailto:` URIs. | PASS on $O(1)$ case-insensitive recipient resolution. |
+| `TestValidateCertForSigningAndEncryption` | Audits certificate validity period (`NotBefore`/`NotAfter`) and `KeyUsage` flags. | PASS on valid flags; error on expired or invalid usage flags. |
+| `TestEncryptForRecipients` | Tests PKCS#7 payload encryption with `AES-256-GCM` and buffer pool safety. | PASS on encrypted output differing from plaintext. |
+| `TestFormatBase64MIME` | Tests standard 76-character CRLF line wrapping for Base64 MIME payloads per RFC 5751. | PASS on line length $\le 76$ chars and clean roundtrip decoding. |
+| `TestEncryptedPrivateKeyLoading` | Tests loading passphrase-encrypted RSA private keys (`x509.DecryptPEMBlock`). | PASS on correct password decryption; error on wrong password. |
+| `TestCheckCryptoHygiene` | Audits S/MIME configurations for weak ciphers (3DES), legacy digests (SHA-1), and expiring certs (<30 days). | PASS on generating proper security warning strings. |
+| `TestSMIMEConfigSetupAndPipeline` | Verifies `setupSMIMEConfig` setup, signer key validation, and missing recipient error checking. | PASS on valid config; error on missing recipient cert. |
+| `TestPKCS7DecryptionRoundtrip` | Performs cryptographic roundtrip of PKCS#7 payload encryption and decryption with RSA private key. | PASS on decrypted payload exactly matching original plaintext. |
+| `TestMultiRecipientDecryptionRoundtrip` | Encrypts payload for multiple recipient certs and verifies each recipient can independently decrypt. | PASS on Alice and Bob both successfully decrypting the single envelope. |
+| `TestECDSAKeySigningValidation` | Validates ECDSA P-256 certificate validation for digital signatures. | PASS on `ValidateCertForSigning` success for ECDSA keys. |
+| `TestRunSMIMEDiagnostics` | Tests pre-flight S/MIME certificate diagnostic probing (`runSMIMEDiagnostics`). | PASS on diagnostic report populating `SignerKeyUsageOK` and `SignerKeyDecryptOK`. |
+
+### 4.5 TLS & Cryptography Tests
+| Test Name | Technical Purpose / Description | Success Criteria |
+| :--- | :--- | :--- |
+| `TestNormalizeFingerprint` | Tests fingerprint normalization (removing colons, converting to uppercase). | PASS on clean 64-character uppercase hex strings. |
+| `TestFormatFingerprint` | Tests formatting hex fingerprints with colon separators (`AA:BB:CC:DD`). | PASS on formatted output matching colon notation. |
+| `TestValidateCertFingerprint` | Validates SHA256 certificate fingerprint string formatting. | PASS on valid 64-character hex strings; error on invalid formats. |
+| `TestComputeCertFingerprint` | Computes deterministic SHA256 fingerprint from X.509 DER byte slice. | PASS on expected 64-character hex digest. |
+| `TestLoadCustomCACerts_SingleFile` | Tests custom CA certificate loading from PEM file. | PASS on populating `x509.CertPool`. |
+| `TestLoadCustomCACerts_Directory` | Tests loading custom CA certificates from directory. | PASS on reading all valid CA files into cert pool. |
+| `TestLoadCustomCACerts_InvalidFile` | Tests error handling for non-existent or invalid CA files. | PASS on returning proper file I/O error. |
+| `TestLoadCustomCACerts_RelativePath` | Rejects relative CA file paths to enforce path security. | PASS on error for relative paths. |
+| `TestCreateFingerprintVerifier` | Tests custom TLS `VerifyConnection` callback for SHA256 fingerprint pinning. | PASS on matching peer certificate fingerprint; error on mismatch. |
+| `TestBuildTLSConfig` | Comprehensive test for `BuildTLSConfig` under all TLS modes (`none`, `tls`, `ignore-trust`, `tls-direct`). | PASS on valid `tls.Config` for each mode. |
+
+### 4.6 Secretprotector & Credentials Security Tests
+| Test Name | Technical Purpose / Description | Success Criteria |
+| :--- | :--- | :--- |
+| `TestLive_SecretprotectorEncryptedPassword` | E2E test of AES-256-GCM encrypted credentials via `v1:gcm:` prefix. Subtests: PlainPassword, EncryptedPassword_NoMasterKey, EncryptedPassword_WithMasterKey, EncryptedOAuth2Token. | PASS on plain password; error without master key; success with master key and encrypted token. |
+| `TestLive_CLI_SecretprotectorCredentials` | CLI E2E test with encrypted credentials in JSON configuration file. | PASS on CLI send with `SECRETPROTECTOR_MASTER_KEY` env var. |
+
+### 4.7 Utility, Validation & I/O Tests
+| Test Name | Technical Purpose / Description | Success Criteria |
+| :--- | :--- | :--- |
+| `TestCleanEmailList` | Trims whitespace and strips empty lines from email slices. | PASS on clean email list. |
+| `TestLoadRecipientList` | Reads recipient addresses from file, stripping CRLF/LF and `#` comment lines. | PASS on returning valid recipient list. |
+| `TestLoadAttachmentList` | Reads attachment paths from file, stripping CRLF/LF and `#` comment lines. | PASS on returning valid file paths. |
+| `TestLoadRecipientListJSON` | Tests JSON array parsing for recipient lists (simple string array or object array with per-recipient vars). | PASS on valid recipient slices and variable maps. |
+| `TestLoadAttachmentListJSON` | Tests JSON array parsing for attachment lists. | PASS on valid attachment path slices. |
+| `TestLoadList` | Unified list loader dispatching between `text` and `json` formats. | PASS on correct format selection and parsing. |
+| `TestScanAttachmentDir` | Scans directory for regular attachment files. | PASS on returning list of absolute file paths. |
+| `TestValidateEmail` | Validates email address format per RFC 5322. | PASS on valid emails; error on missing `@`, missing domain, or invalid characters. |
+| `TestValidateEmailList` | Validates a slice of email addresses. | PASS on all valid addresses; error if any address is malformed. |
+| `TestValidateFilePath` | Enforces absolute file path policy and path traversal protection. | PASS on absolute paths (`/path`, `C:\path`); error on relative paths and `..`. |
+| `TestDecryptSecret` | Decrypts `v1:gcm:` prefixed encrypted secrets using `SECRETPROTECTOR_MASTER_KEY`. | PASS on plain text unchanged; decrypted secret when master key provided. |
+
+### 4.8 Gateway Diagnostics Tests
+| Test Name | Technical Purpose / Description | Success Criteria |
+| :--- | :--- | :--- |
+| `TestGetTLSVersionAndCipherSuiteStrings` | Maps TLS protocol version codes and cipher suite IDs to human-readable strings. | PASS on returning proper display names. |
+| `TestRunDiagnostics_TCPDialError` | Tests diagnostic report handling when target TCP socket is unreachable. | PASS on returning status `"error"` with connection refused message. |
+| `TestRunDiagnostics_OutputModes` | Tests formatting of diagnostic reports in text, JSON, and NDJSON modes. | PASS on valid formatted text, JSON, and NDJSON outputs. |
+| `TestRunDiagnostics_Port465_HandshakeFailure` | Tests implicit TLS handshake error reporting on SMTPS port 465. | PASS on capturing TLS handshake failure. |
+| `TestRunDiagnostics_SMTPClientInitFailure` | Tests ESMTP banner parsing and initial EHLO error reporting. | PASS on capturing banner initialization error. |
+
+### 4.9 Live E2E Integration Suite (WSL Docker Mailpit)
+| Test Name | Technical Purpose / Description | Success Criteria |
+| :--- | :--- | :--- |
+| `TestLive_BasicEmail` | Basic email transmission over live TCP socket to Mailpit. | PASS on `status: success` and Mailpit REST API message verification. |
+| `TestLive_FullFeaturedEmail` | Comprehensive test of ALL `EmailParams` fields (attachments, custom headers, DSN, importance, audit log). | PASS on all fields verified via Mailpit API. |
+| `TestLive_Authentication` | Tests SASL authentication modes (`plain`, `login`, `auto`). | PASS on successful send for each authentication mechanism. |
+| `TestLive_ListsAndDirectories` | Live test of recipient lists, attachment lists, and attachment directory scanning. | PASS on correct recipient count (4) and attachment count (4) in Mailpit. |
+| `TestLive_MaxAttachmentSize` | Tests attachment size guard rejection and acceptance against live server. | PASS on size limit rejection; success within limit. |
+| `TestLive_MaxRecipients` | E2E test of `--max-recipients` limit guard with live SMTP server. | PASS on rejection when exceeding limit; success within limit. |
+| `TestLive_SingleRecipient` | E2E test of `--single-recipient` batch mode with rate limiting via Mailpit. | PASS on N separate emails sent for N recipients, verified via Mailpit API. |
+| `TestLive_JSONListFormat` | E2E test of `--list-format json` for recipient and attachment lists via Mailpit. | PASS on successful send with JSON-parsed recipients and attachments. |
+| `TestLive_PrivacyNoLogRecipients` | Tests `--no-log-recipients` GDPR privacy redacting flag. | PASS on audit log containing `[N recipients redacted]`. |
+| `TestLive_ContextCancellation` | Tests `context.Context` timeout cancellation during send retries. | PASS on detecting context cancellation. |
+| `TestLive_RetryMechanism` | Tests retry backoff loop execution against live server. | PASS on `status: success` with total attempt count. |
+| `TestLive_TLSModes` | E2E test of TLS modes (`none`, `ignore-trust`). | PASS on successful send under each TLS mode. |
+| `TestLive_TLSCACert` | E2E test of `--tls-ca-cert` custom CA certificate loading. | PASS on valid cert pool and successful TLS handshake. |
+| `TestLive_TLSCADir` | E2E test of `--tls-ca-dir` custom CA certificate directory loading. | PASS on loading `.pem`/`.crt` certs and successful send. |
+| `TestLive_TLSFingerprintValidation` | E2E test of SHA256 TLS certificate fingerprint pinning. | PASS on matching fingerprint; error on mismatch. |
+| `TestLive_DiagnosticsWithTLSOptions` | E2E test of diagnostic probing with TLS trust options. | PASS on diagnostic success with `ignore-trust` and custom CA. |
+| `TestLive_CLI_TLSOptions` | E2E test of CLI binary with TLS configuration options. | PASS on CLI send with TLS mode in JSON config file. |
+| `TestLive_DiagnosticsSTARTTLS` | E2E test of STARTTLS TLS upgrade with Mailpit. | PASS on `status: success` with TLS 1.3, cipher info, and cert chain output. |
+| `TestLive_ImplicitTLS_Port465` | E2E test of implicit TLS (SMTPS) via SSL-only Mailpit container. | PASS on successful send via `tls-direct` mode with TLS 1.3. |
+| `TestLive_OAuth2_XOAUTH2Authentication` | E2E test of XOAUTH2 authentication via OAuth2 mock server. | PASS on successful XOAUTH2 auth with valid, test, and encrypted tokens. |
+| `TestLive_RunDiagnostics` | E2E test of `RunDiagnostics` gateway probe against live Mailpit server. | PASS on `status: success` with TCP/EHLO latency metrics. |
+| `TestLive_OutputDiagReport` | E2E test of `OutputDiagReport` output modes with live diagnostic data. | PASS on text, JSON, NDJSON, and certs output modes. |
+| `TestLive_ImportanceLevels` | E2E test of `--importance` flag (`high`, `normal`, `low`). | PASS on successful send with each importance level. |
+| `TestLive_CLIBinary` | End-to-end CLI binary execution via `go run ./cmd/mailxgo`. | PASS on JSON output with `status: success`, diagnostics, and version output. |
+| `TestLive_EmailValidation` | Live test of email address validation rejection for malformed addresses. | PASS on error containing `invalid` for malformed addresses. |
+| `TestLive_ConfigFileAllOptions` | Live test of comprehensive JSON config file containing all options. | PASS on config load and CLI send with config file. |
+| `TestLive_ErrorClassification` | Live test of `ClassifyError()` for TLS, Auth, Connection, and Send errors. | PASS on correct `ErrorType` classification. |
+| `TestLive_SMIMESign` | E2E test of S/MIME digital signing via Mailpit container. | PASS on `status: success` with `multipart/signed` EML payload. |
+| `TestLive_SMIMEEncrypt` | E2E test of S/MIME payload encryption/decryption via Mailpit container. | PASS on `status: success`, unencrypted secret absent from EML, and PKCS#7 envelope decrypted back to original secret. |
+| `TestLive_SMIMEDiagnostics` | E2E test of S/MIME gateway diagnostics probe via Mailpit container. | PASS on `status: success` with `SMIMEInfo` certificate expiration, usage, and decrypt validity. |
+| `TestLive_SMIMESignAndEncrypt` | E2E test of combined S/MIME digital signing and payload encryption via Mailpit container. | PASS on `status: success`, envelope decryption with recipient key, and inner signature verification. |
+| `TestLive_SMIMERecipientCertDir` | E2E test of recipient certificate directory auto-resolution via Mailpit container. | PASS on `status: success` with multi-cert directory SAN email matching. |
+| `TestMainCompiles` | Asserts `cmd/mailxgo` package compiles without errors. | PASS on clean compilation. |
 
 ---
 
