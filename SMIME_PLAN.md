@@ -46,19 +46,28 @@ Add S/MIME (Secure/Multipurpose Internet Mail Extensions) support to mailxgo for
 
 ## Implementation Approach
 
-### Option A: Pure Go (pkcs7 package)
-- Use `go.mozilla.org/pkcs7` for PKCS#7 signing/encryption
-- Pros: No external dependencies, cross-platform
-- Cons: Less mature, may need patches for edge cases
+### Leveraging Existing Libraries
 
-### Option B: OpenSSL via exec
-- Shell out to `openssl smime` command
-- Pros: Battle-tested, full RFC compliance
-- Cons: Requires OpenSSL installed, slower, platform-dependent paths
+**Critical Discovery**: `go-mail` (already in use) has **native S/MIME signing support**:
+- `Msg.SignWithKeypair(privateKey, certificate, intermediateCerts...)`
+- `Msg.SignWithTLSCertificate(tlsCert)`
+- Handles MIME canonicalization and PKCS#7 structure internally
 
-### Recommended: Option A with OpenSSL fallback
-1. Primary: Use pure Go `mozilla/pkcs7` for signing/encryption
-2. Fallback: If Go implementation fails, offer `--smime-openssl` flag to use OpenSSL
+This eliminates the need for manual PKCS#7 signing implementation.
+
+### Library Responsibilities
+
+| Library | Purpose | Status |
+|---------|---------|--------|
+| `github.com/wneessen/go-mail` v0.8.1 | S/MIME signing via `SignWithKeypair()` | Already installed |
+| `go.mozilla.org/pkcs7` | S/MIME encryption (EnvelopedData) | To add |
+| `golang.org/x/crypto/pkcs12` | PKCS#12 (.pfx/.p12) bundle parsing | To add |
+
+### Recommended Approach
+1. **Signing**: Use go-mail's native `Msg.SignWithKeypair()` - handles MIME structure automatically
+2. **Encryption**: Use `go.mozilla.org/pkcs7` for `EnvelopedData` creation
+3. **PKCS#12**: Use `golang.org/x/crypto/pkcs12` for enterprise certificate bundles
+4. **No OpenSSL fallback needed**: Pure Go implementation is sufficient
 
 ## Architecture Changes
 
@@ -70,7 +79,6 @@ package mailxgo
 import (
     "crypto"
     "crypto/x509"
-    "time"
 )
 
 type SMIMEConfig struct {
@@ -78,29 +86,34 @@ type SMIMEConfig struct {
     Encrypt          bool
     SignerCert       *x509.Certificate
     SignerKey        crypto.PrivateKey  // RSA or ECDSA
+    IntermediateCerts []*x509.Certificate
     RecipientCerts   []*x509.Certificate
-    Algorithm        string // aes-256-cbc, aes-128-cbc, 3des-cbc
-    DigestAlgorithm  string // sha256, sha384, sha512
+    Algorithm        string // aes-256-cbc, aes-128-cbc, 3des-cbc (encryption only)
 }
-
-// Core S/MIME operations
-func (s *SMIMEConfig) SignMessage(data []byte) ([]byte, error)
-func (s *SMIMEConfig) EncryptMessage(data []byte) ([]byte, error)
-func (s *SMIMEConfig) SignAndEncrypt(data []byte) ([]byte, error)
 
 // Certificate/key loading
 func LoadCertificate(path string) (*x509.Certificate, error)
 func LoadPrivateKey(path, password string) (crypto.PrivateKey, error)
-func LoadPKCS12(path, password string) (*x509.Certificate, crypto.PrivateKey, error)
+func LoadPKCS12(path, password string) (*x509.Certificate, crypto.PrivateKey, []*x509.Certificate, error)
 func LoadCertificatesFromDir(dirPath string) ([]*x509.Certificate, error)
 
 // Pre-flight validation
 func ValidateCertForSigning(cert *x509.Certificate) error
 func ValidateCertForEncryption(cert *x509.Certificate) error
 
-// MIME canonicalization (RFC 5751 compliance)
-func CanonicalizeCRLF(data []byte) []byte
-func WrapSMIME(signedOrEncrypted []byte, contentType string) []byte
+// Encryption only (signing handled by go-mail natively)
+func EncryptForRecipients(mimeData []byte, recipients []*x509.Certificate) ([]byte, error)
+```
+
+**Note**: Signing is handled directly by `go-mail`:
+```go
+// In mailer.go - signing is a single method call
+if params.SMIMESign {
+    err := msg.SignWithKeypair(smimeConfig.SignerKey, smimeConfig.SignerCert, smimeConfig.IntermediateCerts...)
+    if err != nil {
+        return nil, fmt.Errorf("S/MIME signing failed: %w", err)
+    }
+}
 ```
 
 ### Changes to Existing Files
@@ -112,45 +125,49 @@ func WrapSMIME(signedOrEncrypted []byte, contentType string) []byte
 
 ### Message Composition Pipeline
 
-The pipeline uses a 2-stage composition process to integrate with `go-mail`:
+The pipeline leverages go-mail's native S/MIME signing support:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ Stage 1: go-mail Message Construction                                   │
+│ Sign-Only Flow (using go-mail native support)                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│  mail.NewMsg() ──▶ SetFrom/SetTo/SetSubject ──▶ SetBody/AttachFile     │
+│       │                                                                 │
+│       ▼                                                                 │
+│  msg.SignWithKeypair(key, cert, intermediates...)                       │
+│       │                                                                 │
+│       ▼   (go-mail handles MIME canonicalization & PKCS#7 internally)  │
+│  client.DialAndSend(msg)                                                │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Encrypt-Only Flow (using pkcs7 library)                                 │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  mail.NewMsg() ──▶ SetFrom/SetTo/SetSubject ──▶ SetBody/AttachFile     │
 │       │                                                                 │
 │       ▼                                                                 │
 │  msg.WriteTo(buf) ──▶ Raw RFC 822 MIME bytes                           │
+│       │                                                                 │
+│       ▼                                                                 │
+│  pkcs7.Encrypt(buf.Bytes(), recipientCerts)                            │
+│       │                                                                 │
+│       ▼                                                                 │
+│  New mail.Msg with application/pkcs7-mime body ──▶ DialAndSend()       │
 └─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
+
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ Stage 2: S/MIME Transformation                                          │
+│ Sign + Encrypt Flow (combined)                                          │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  Raw MIME bytes                                                         │
+│  mail.NewMsg() ──▶ Build message ──▶ SignWithKeypair()                 │
 │       │                                                                 │
 │       ▼                                                                 │
-│  CanonicalizeCRLF() ──▶ Convert LF to CRLF (RFC 5751 requirement)      │
+│  signedMsg.WriteTo(buf) ──▶ Signed MIME bytes                          │
 │       │                                                                 │
 │       ▼                                                                 │
-│  ┌─────────────────┐     ┌─────────────────┐                           │
-│  │ pkcs7.Sign()    │ OR  │ pkcs7.Encrypt() │  (or both for Sign+Encrypt)│
-│  │ SignerCert+Key  │     │ RecipientCerts  │                           │
-│  └────────┬────────┘     └────────┬────────┘                           │
-│           │                       │                                     │
-│           ▼                       ▼                                     │
-│  DER binary output ──▶ Base64 encode (76 char lines per RFC 2045)      │
+│  pkcs7.Encrypt(buf.Bytes(), recipientCerts)                            │
 │       │                                                                 │
 │       ▼                                                                 │
-│  WrapSMIME() ──▶ Add Content-Type: application/pkcs7-mime headers      │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Stage 3: Final Dispatch                                                 │
-├─────────────────────────────────────────────────────────────────────────┤
-│  New mail.Msg with S/MIME body ──▶ client.DialAndSend()                │
+│  New mail.Msg with encrypted body ──▶ DialAndSend()                    │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -259,10 +276,12 @@ func ValidateCertForEncryption(cert *x509.Certificate) error {
 ## Dependencies
 
 Add to `go.mod`:
+```bash
+go get go.mozilla.org/pkcs7
+go get golang.org/x/crypto/pkcs12
 ```
-go.mozilla.org/pkcs7 v0.9.0
-golang.org/x/crypto v0.x.x  // for pkcs12 parsing
-```
+
+**Note**: `github.com/wneessen/go-mail` v0.8.1 is already installed and provides native S/MIME signing.
 
 ## Security Considerations
 
@@ -283,16 +302,16 @@ golang.org/x/crypto v0.x.x  // for pkcs12 parsing
 
 ## Estimated Effort
 
-| Component | Hours |
-|-----------|-------|
-| smime.go core (sign/encrypt/validate) | 10 |
-| PKCS#12 support | 2 |
-| CRLF canonicalization & MIME wrapping | 2 |
-| CLI/config integration | 4 |
-| Unit tests | 6 |
-| Integration tests | 4 |
-| Documentation | 2 |
-| **Total** | **30** |
+| Component | Hours | Notes |
+|-----------|-------|-------|
+| smime.go core (encrypt/validate) | 4 | Signing handled by go-mail |
+| PKCS#12 support | 2 | Using golang.org/x/crypto/pkcs12 |
+| CLI/config integration | 3 | Flag parsing, config struct updates |
+| mailer.go integration | 2 | Wire up SignWithKeypair + encryption |
+| Unit tests | 4 | Cert loading, validation, encryption |
+| Integration tests | 3 | Sign/encrypt/verify with Mailpit |
+| Documentation | 2 | README, TESTING, examples |
+| **Total** | **20** | Reduced from 30h due to go-mail native signing |
 
 ## Example Usage
 
