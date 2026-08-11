@@ -21,7 +21,7 @@ Add S/MIME (Secure/Multipurpose Internet Mail Extensions) support to mailxgo for
 | `--smime-key-password` | String | Password for encrypted private key (supports `v1:gcm:` prefix) |
 | `--smime-pkcs12` | String | Path to PKCS#12 bundle (.pfx/.p12) containing cert and key |
 | `--smime-recipient-cert` | String | Path to recipient certificate(s) for encryption (repeatable or comma-separated) |
-| `--smime-recipient-cert-dir` | String | Directory containing recipient certificates (.pem/.crt/.cer) |
+| `--smime-recipient-cert-dir` | String | Directory containing recipient certificates (.pem/.crt/.cer) - auto-indexed by SAN email |
 | `--smime-algorithm` | String | Encryption algorithm: `aes-256-cbc` (default), `aes-128-cbc`, `3des-cbc` |
 | `--smime-digest` | String | Signature digest: `sha256` (default), `sha384`, `sha512` |
 
@@ -39,6 +39,7 @@ Add S/MIME (Secure/Multipurpose Internet Mail Extensions) support to mailxgo for
     "/etc/mailxgo/certs/recipient1.pem",
     "/etc/mailxgo/certs/recipient2.pem"
   ],
+  "smime_recipient_cert_dir": "/etc/mailxgo/certs/recipients/",
   "smime_algorithm": "aes-256-cbc",
   "smime_digest": "sha256"
 }
@@ -77,18 +78,27 @@ This eliminates the need for manual PKCS#7 signing implementation.
 package mailxgo
 
 import (
+    "bytes"
     "crypto"
     "crypto/x509"
+    "sync"
 )
 
 type SMIMEConfig struct {
-    Sign             bool
-    Encrypt          bool
-    SignerCert       *x509.Certificate
-    SignerKey        crypto.PrivateKey  // RSA or ECDSA
+    Sign              bool
+    Encrypt           bool
+    SignerCert        *x509.Certificate
+    SignerKey         crypto.PrivateKey  // RSA or ECDSA
     IntermediateCerts []*x509.Certificate
-    RecipientCerts   []*x509.Certificate
-    Algorithm        string // aes-256-cbc, aes-128-cbc, 3des-cbc (encryption only)
+    RecipientCerts    []*x509.Certificate
+    Algorithm         string // aes-256-cbc, aes-128-cbc, 3des-cbc (encryption only)
+}
+
+// Buffer pool for large payload processing (reduces GC pressure)
+var smimeBufferPool = sync.Pool{
+    New: func() interface{} {
+        return new(bytes.Buffer)
+    },
 }
 
 // Certificate/key loading
@@ -97,12 +107,20 @@ func LoadPrivateKey(path, password string) (crypto.PrivateKey, error)
 func LoadPKCS12(path, password string) (*x509.Certificate, crypto.PrivateKey, []*x509.Certificate, error)
 func LoadCertificatesFromDir(dirPath string) ([]*x509.Certificate, error)
 
+// Auto-resolve recipient certs by email address (SAN/EmailAddresses)
+func BuildCertIndex(certs []*x509.Certificate) map[string]*x509.Certificate
+func ResolveCertForEmail(index map[string]*x509.Certificate, email string) *x509.Certificate
+
 // Pre-flight validation
 func ValidateCertForSigning(cert *x509.Certificate) error
 func ValidateCertForEncryption(cert *x509.Certificate) error
+func CheckKeyFilePermissions(path string) error  // Warn if > 0600 on Unix
 
-// Encryption only (signing handled by go-mail natively)
-func EncryptForRecipients(mimeData []byte, recipients []*x509.Certificate) ([]byte, error)
+// Encryption (signing handled by go-mail natively)
+func EncryptForRecipients(mimeData []byte, recipients []*x509.Certificate, algorithm string) ([]byte, error)
+
+// Size estimation for pre-dial bounds check
+func EstimateEncryptedSize(rawSize int64) int64  // Returns rawSize * 1.37 for S/MIME overhead
 ```
 
 **Note**: Signing is handled directly by `go-mail`:
@@ -121,7 +139,8 @@ if params.SMIMESign {
 1. **cli.go**: Add S/MIME flag parsing
 2. **config.go**: Add S/MIME config fields and JSON parsing
 3. **types.go**: Add `SMIMEConfig` to `EmailParams`
-4. **mailer.go**: Integrate S/MIME into message composition pipeline
+4. **mailer.go**: Integrate S/MIME into message composition pipeline, pre-dial size check with overhead
+5. **diag.go**: Add S/MIME certificate diagnostics in `--diag` mode
 
 ### Message Composition Pipeline
 
@@ -190,6 +209,207 @@ This means:
 - Simply collect all certs from `--smime-recipient-cert` and `--smime-recipient-cert-dir`
 - Pass them all to `pkcs7.Encrypt()` as a single slice
 
+## Optimizations
+
+### 1. Pre-Dial Size Bounds Check with S/MIME Overhead
+
+S/MIME encryption and Base64 wrapping add ~35-40% payload size overhead. Update pre-dial size validation to account for this:
+
+```go
+// In mailer.go, before dialing
+const smimeOverheadFactor = 1.37  // 4/3 Base64 + PKCS#7 headers
+
+func EstimateEncryptedSize(rawSize int64) int64 {
+    return int64(float64(rawSize) * smimeOverheadFactor)
+}
+
+// Check against --max-attachment-size AND remote ESMTP SIZE limit
+if params.SMIMEEncrypt {
+    estimatedSize := EstimateEncryptedSize(totalAttachmentSize)
+    if params.MaxAttachmentMB > 0 && estimatedSize > int64(params.MaxAttachmentMB)*1024*1024 {
+        return nil, fmt.Errorf("estimated S/MIME payload (%d MB) exceeds --max-attachment-size (%d MB)",
+            estimatedSize/(1024*1024), params.MaxAttachmentMB)
+    }
+}
+```
+
+### 2. Auto-Resolve Recipient Certs by Email Address (SAN/Subject)
+
+When `--smime-recipient-cert-dir` is supplied, build an in-memory index by email:
+
+```go
+// Index certs by SAN email or cert.EmailAddresses
+func BuildCertIndex(certs []*x509.Certificate) map[string]*x509.Certificate {
+    index := make(map[string]*x509.Certificate)
+    for _, cert := range certs {
+        // Index by EmailAddresses field
+        for _, email := range cert.EmailAddresses {
+            index[strings.ToLower(email)] = cert
+        }
+        // Also check SAN rfc822Name entries
+        for _, san := range cert.URIs {
+            if strings.HasPrefix(san.String(), "mailto:") {
+                email := strings.TrimPrefix(san.String(), "mailto:")
+                index[strings.ToLower(email)] = cert
+            }
+        }
+    }
+    return index
+}
+
+// Auto-resolve cert for a recipient email
+func ResolveCertForEmail(index map[string]*x509.Certificate, email string) *x509.Certificate {
+    return index[strings.ToLower(email)]
+}
+```
+
+**Usage**: When encrypting for `alice@corp.local`, mailxgo automatically finds `alice@corp.local`'s cert from the directory without explicit `--smime-recipient-cert` per recipient.
+
+### 3. S/MIME Diagnostic Probing in `--diag` Mode
+
+Extend `--diag` to audit S/MIME health when S/MIME flags are provided:
+
+```go
+// In diag.go, add to DiagReport struct
+type SMIMEDiagnostics struct {
+    SignerCertValid     bool   `json:"signer_cert_valid,omitempty"`
+    SignerCertExpiry    int    `json:"signer_cert_days_until_expiry,omitempty"`
+    SignerKeyUsageOK    bool   `json:"signer_key_usage_ok,omitempty"`
+    SignerKeyDecryptOK  bool   `json:"signer_key_decrypt_ok,omitempty"`
+    RecipientCertsValid []bool `json:"recipient_certs_valid,omitempty"`
+    RecipientCertExpiry []int  `json:"recipient_cert_days_until_expiry,omitempty"`
+    Warnings            []string `json:"warnings,omitempty"`
+}
+
+// Diagnostic checks:
+// - Sender/recipient certificate expiration (<30 days = warning)
+// - X.509 KeyUsage flags (DigitalSignature, KeyEncipherment)
+// - ExtKeyUsage includes EmailProtection
+// - Private key decryption test (with v1:gcm: support)
+// - Key file permissions check (>0600 = warning on Unix)
+```
+
+**Output example**:
+```
+--- S/MIME Certificate Diagnostics ---
+Signer Certificate   : /path/to/sender.pem
+  Subject            : CN=sender@corp.local
+  Expiration         : 2027-03-15 (217 days remaining)
+  KeyUsage           : DigitalSignature ✓
+  ExtKeyUsage        : EmailProtection ✓
+  Private Key        : Decryption OK ✓
+
+Recipient Certificates:
+  [1] alice@corp.local : Valid, expires 2027-05-20 (283 days)
+  [2] bob@corp.local   : WARNING: expires in 18 days!
+
+Warnings:
+  - Recipient cert bob@corp.local expires in 18 days
+```
+
+### 4. Memory Optimization via sync.Pool Buffering
+
+For large MFT payloads (50MB+), use pooled buffers to reduce GC pressure:
+
+```go
+var smimeBufferPool = sync.Pool{
+    New: func() interface{} {
+        return bytes.NewBuffer(make([]byte, 0, 1024*1024)) // 1MB initial capacity
+    },
+}
+
+func EncryptForRecipients(mimeData []byte, recipients []*x509.Certificate, algorithm string) ([]byte, error) {
+    buf := smimeBufferPool.Get().(*bytes.Buffer)
+    defer func() {
+        buf.Reset()
+        smimeBufferPool.Put(buf)
+    }()
+    
+    // Use buf for intermediate processing...
+    encrypted, err := pkcs7.Encrypt(mimeData, recipients)
+    if err != nil {
+        return nil, err
+    }
+    
+    // Base64 encode into pooled buffer
+    encoder := base64.NewEncoder(base64.StdEncoding, buf)
+    // ... wrap at 76 chars per RFC 2045
+    
+    return buf.Bytes(), nil
+}
+```
+
+### 5. Automated Cryptographic Hygiene Warnings
+
+Add runtime security warnings in telemetry outputs (NDJSON/JSON/text):
+
+```go
+func checkCryptoHygiene(config *SMIMEConfig, keyPath string) []string {
+    var warnings []string
+    
+    // Warn on weak encryption algorithm
+    if config.Algorithm == "3des-cbc" {
+        warnings = append(warnings, "WARNING: 3DES-CBC is deprecated; use AES-256-CBC")
+    }
+    
+    // Warn on weak digest (if we ever support sha1)
+    if config.DigestAlgorithm == "sha1" {
+        warnings = append(warnings, "WARNING: SHA-1 is deprecated; use SHA-256 or higher")
+    }
+    
+    // Warn on loose key file permissions (Unix only)
+    if runtime.GOOS != "windows" {
+        if err := CheckKeyFilePermissions(keyPath); err != nil {
+            warnings = append(warnings, fmt.Sprintf("WARNING: %v", err))
+        }
+    }
+    
+    // Warn on near-expiry certs (<30 days)
+    if config.SignerCert != nil {
+        daysLeft := int(time.Until(config.SignerCert.NotAfter).Hours() / 24)
+        if daysLeft < 30 {
+            warnings = append(warnings, fmt.Sprintf("WARNING: Signer certificate expires in %d days", daysLeft))
+        }
+    }
+    
+    return warnings
+}
+
+func CheckKeyFilePermissions(path string) error {
+    info, err := os.Stat(path)
+    if err != nil {
+        return err
+    }
+    mode := info.Mode().Perm()
+    if mode&0077 != 0 {  // Group or world readable/writable
+        return fmt.Errorf("private key %s has insecure permissions %04o (should be 0600)", path, mode)
+    }
+    return nil
+}
+```
+
+### 6. S/MIME Configuration Profile Presets
+
+Support default S/MIME credentials in config file to simplify CLI commands:
+
+```json
+{
+  "smime_default_cert": "/etc/mailxgo/certs/sender.pem",
+  "smime_default_key": "/etc/mailxgo/certs/sender.key",
+  "smime_default_key_password": "v1:gcm:encrypted-password",
+  "smime_recipient_cert_dir": "/etc/mailxgo/certs/recipients/"
+}
+```
+
+**Benefit**: Shortened CLI for automated schedulers:
+```shell
+# Before: explicit paths every time
+mailxgo --smime-sign --smime-cert /path/to/cert.pem --smime-key /path/to/key.pem ...
+
+# After: uses config defaults
+mailxgo --smime-sign --smime-encrypt --to alice@corp.local --body "Report"
+```
+
 ## Pre-flight Certificate Validation
 
 Before signing or encrypting, validate certificates to prevent silent failures:
@@ -249,12 +469,15 @@ func ValidateCertForEncryption(cert *x509.Certificate) error {
 
 ### Unit Tests (`smime_test.go`)
 - Certificate/key loading (PEM and PKCS#12)
-- CRLF canonicalization
+- Auto-resolve certs by email (SAN/EmailAddresses)
 - Signing with various digest algorithms (SHA-256, SHA-384, SHA-512)
 - Encryption with various symmetric algorithms (AES-256-CBC, AES-128-CBC, 3DES)
 - Sign + encrypt combined
 - Multi-recipient encryption
 - Pre-flight validation (expired certs, missing key usage)
+- Pre-dial size estimation with S/MIME overhead
+- Key file permission checks
+- Crypto hygiene warnings (3DES, SHA-1, permissions)
 - Error cases (invalid certs, wrong passwords, corrupted files)
 
 ### Integration Tests
@@ -265,6 +488,8 @@ func ValidateCertForEncryption(cert *x509.Certificate) error {
    openssl smime -verify -in message.eml -CAfile ca.pem
    openssl smime -decrypt -in message.eml -inkey recipient.key
    ```
+4. **Diagnostics**: Test `--diag` with S/MIME certs (expiry warnings, key usage checks)
+5. **Auto-resolve**: Test cert directory indexing by email address
 
 ### Test Certificates
 - Generate test CA + end-entity certs in `testdata/smime/`
@@ -272,6 +497,7 @@ func ValidateCertForEncryption(cert *x509.Certificate) error {
 - Include PKCS#12 bundles for enterprise format testing
 - Include expired cert for negative testing
 - Include cert without EmailProtection EKU for validation testing
+- Include certs with various SAN email addresses for auto-resolve testing
 
 ## Dependencies
 
@@ -285,14 +511,15 @@ go get golang.org/x/crypto/pkcs12
 
 ## Security Considerations
 
-1. **Private Key Protection**: Warn if key file permissions > 0600
-2. **Algorithm Deprecation**: Warn if using 3DES (prefer AES-256)
+1. **Private Key Protection**: Warn if key file permissions > 0600 (Unix)
+2. **Algorithm Deprecation**: Warn if using 3DES or SHA-1 (prefer AES-256, SHA-256+)
 3. **Certificate Validation**: Validate all certs before use:
-   - Check expiration dates
+   - Check expiration dates (warn if <30 days)
    - Verify KeyUsage flags (DigitalSignature for signing, KeyEncipherment for encryption)
    - Verify ExtKeyUsage includes EmailProtection (warn if missing, don't fail)
 4. **Key Password**: Support secretprotector `v1:gcm:` prefix for encrypted key passwords
 5. **PKCS#12 Security**: Clear decrypted key material from memory after use
+6. **Size Limits**: Check estimated encrypted size against limits before dialing
 
 ## Documentation Updates
 
@@ -308,10 +535,15 @@ go get golang.org/x/crypto/pkcs12
 | PKCS#12 support | 2 | Using golang.org/x/crypto/pkcs12 |
 | CLI/config integration | 3 | Flag parsing, config struct updates |
 | mailer.go integration | 2 | Wire up SignWithKeypair + encryption |
-| Unit tests | 4 | Cert loading, validation, encryption |
-| Integration tests | 3 | Sign/encrypt/verify with Mailpit |
+| Pre-dial size check with S/MIME overhead | 1 | Estimate encrypted size |
+| Auto-resolve certs by email (SAN index) | 2 | BuildCertIndex, ResolveCertForEmail |
+| S/MIME diagnostics in --diag | 2 | Cert expiry, key usage, key decrypt test |
+| Crypto hygiene warnings | 1 | 3DES/SHA-1 warnings, permission checks |
+| sync.Pool buffering | 1 | Reduce GC for large payloads |
+| Unit tests | 5 | All features + edge cases |
+| Integration tests | 4 | Mailpit roundtrip, OpenSSL interop |
 | Documentation | 2 | README, TESTING, examples |
-| **Total** | **20** | Reduced from 30h due to go-mail native signing |
+| **Total** | **29** | |
 
 ## Example Usage
 
@@ -353,8 +585,10 @@ mailxgo \
   --body "This message is encrypted."
 ```
 
-### Encrypt for Multiple Recipients
+### Encrypt with Auto-Resolve (Directory Index)
 ```shell
+# Certs in directory are indexed by SAN email
+# alice@corp.local.pem, bob@corp.local.pem auto-matched to recipients
 mailxgo \
   --smtp-server smtp.corp.local \
   --smime-encrypt \
@@ -362,7 +596,7 @@ mailxgo \
   --from-email sender@corp.local \
   --to-email alice@corp.local,bob@corp.local \
   --subject "Encrypted Message" \
-  --body "All recipients can decrypt with their own keys."
+  --body "Certs auto-resolved from directory."
 ```
 
 ### Sign + Encrypt
@@ -379,16 +613,35 @@ mailxgo \
   --body "Confidential message with verified origin."
 ```
 
+### S/MIME Pre-Flight Diagnostics
+```shell
+mailxgo \
+  --diag \
+  --smime-cert /path/to/sender.pem \
+  --smime-key /path/to/sender.key \
+  --smime-recipient-cert-dir /path/to/recipient-certs/ \
+  --from-email sender@corp.local
+```
+
+### Using Config Defaults
+```shell
+# With ~/.mailxgo.json containing smime_default_cert, smime_default_key, etc.
+mailxgo --smime-sign --smime-encrypt --to alice@corp.local --body "Report"
+```
+
 ## Resolved Design Decisions
 
-1. **Multiple Recipients with Different Certs**: PKCS#7 EnvelopedData handles this natively. All recipient certificates are passed to `pkcs7.Encrypt()` which creates a `RecipientInfos` array with the symmetric key encrypted for each recipient's public key. No address-to-cert mapping needed.
+1. **Multiple Recipients with Different Certs**: PKCS#7 EnvelopedData handles this natively. All recipient certificates are passed to `pkcs7.Encrypt()` which creates a `RecipientInfos` array with the symmetric key encrypted for each recipient's public key.
 
-2. **Certificate Discovery (LDAP/AD)**: Deferred to Phase 2. Phase 1 requires local certificate files or directory scanning only.
+2. **Certificate Discovery**: Auto-resolve from `--smime-recipient-cert-dir` using SAN email / `cert.EmailAddresses` index. LDAP/AD lookup not included (local files/directory only).
 
-3. **go-mail Integration**: Use 2-stage composition:
-   - Stage 1: Build message with go-mail, export to raw bytes via `msg.WriteTo()`
-   - Stage 2: Canonicalize, sign/encrypt with pkcs7, wrap in S/MIME MIME structure
-   - Stage 3: Create new `mail.Msg` with S/MIME body for dispatch
+3. **go-mail Integration**: Signing uses native `Msg.SignWithKeypair()`. Encryption uses 2-stage composition (build → export → encrypt → wrap).
+
+4. **Pre-Dial Size Validation**: Account for S/MIME overhead (×1.37) when checking against `--max-attachment-size` and remote ESMTP SIZE limit.
+
+5. **S/MIME Diagnostics**: Extended `--diag` mode validates certs, key usage, expiration, and key decryption before network operations.
+
+6. **Memory Efficiency**: `sync.Pool` buffering for large payloads reduces GC pressure in batch MFT scenarios.
 
 ---
 
