@@ -274,6 +274,14 @@ func ensureMailpitSSLContainer() error {
 		_, _ = runDockerCmd("rm", "-f", containerNameSSL)
 	}
 
+	// Container doesn't exist, check if image exists
+	if _, err := runDockerCmd("image", "inspect", imageName); err != nil {
+		// Image doesn't exist, pull it
+		if _, err := runDockerCmd("pull", imageName); err != nil {
+			return fmt.Errorf("failed to pull mailpit image: %w", err)
+		}
+	}
+
 	// Reuse certs from main container or generate new ones
 	certDir := testTLSCertDir
 	if certDir == "" {
