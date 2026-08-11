@@ -24,6 +24,7 @@ Thumbs.db
 *.swo
 
 # Languages
+node_modules/
 vendor/
 __pycache__/
 
@@ -67,6 +68,7 @@ testsamples/
 # Build files
 releases/
 build/
+output/
 .editorconfig
 .windsurf
 .antigravity

@@ -381,7 +381,7 @@ func LoadAttachmentListJSON(path string) ([]string, error) {
 // LoadList reads a list file in the specified format (text or json).
 // For recipients, returns the list and optional per-recipient template variables.
 // For attachments, recipientVars will be nil.
-func LoadList(path string, format string, isRecipients bool) ([]string, []map[string]string, error) {
+func LoadList(path, format string, isRecipients bool) ([]string, []map[string]string, error) {
 	switch strings.ToLower(format) {
 	case "json":
 		if isRecipients {

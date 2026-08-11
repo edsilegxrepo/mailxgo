@@ -1,0 +1,2 @@
+./cmd/mailxgo
+github.com/edsilegxrepo/mailxgo.version

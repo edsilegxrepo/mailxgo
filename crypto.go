@@ -38,7 +38,7 @@ func IsEncryptedSecret(s string) bool {
 // DecryptSecret decrypts a secret if it has the v1:gcm: encrypted prefix.
 // If the secret is not encrypted, it returns the original value unchanged.
 // Uses the master key from environment variable SECRETPROTECTOR_MASTER_KEY or the provided keyEnv.
-func DecryptSecret(secret string, keyEnv string) (string, error) {
+func DecryptSecret(secret, keyEnv string) (string, error) {
 	if secret == "" {
 		return "", nil
 	}
@@ -179,7 +179,7 @@ func ValidateCertFingerprint(fingerprint string) error {
 		return fmt.Errorf("invalid SHA256 fingerprint length: expected 64 hex chars, got %d", len(normalized))
 	}
 	for _, c := range normalized {
-		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')) {
+		if (c < '0' || c > '9') && (c < 'A' || c > 'F') {
 			return fmt.Errorf("invalid character in fingerprint: %c", c)
 		}
 	}
@@ -198,10 +198,11 @@ type TLSConfigParams struct {
 // BuildTLSConfig creates a tls.Config based on the provided parameters.
 // This centralizes TLS configuration to avoid duplication across mailer and diag code.
 func BuildTLSConfig(params TLSConfigParams) (*tls.Config, error) {
-	// #nosec G402 -- InsecureSkipVerify is user-configurable via ignore-trust mode for internal relays.
-	// tls-direct mode also supports InsecureSkipVerify for self-signed certs on implicit TLS ports
+	// InsecureSkipVerify is user-configurable via ignore-trust mode for internal relays.
+	// tls-direct mode also supports InsecureSkipVerify for self-signed certs on implicit TLS ports.
 	skipVerify := params.TLSMode == "ignore-trust" || params.TLSMode == "tls-direct"
 	tlsConfig := &tls.Config{
+		// #nosec G402 -- User-configurable TLS modes (ignore-trust, tls-direct) for internal relays and self-signed certs
 		InsecureSkipVerify: skipVerify,
 		ServerName:         params.ServerName,
 		MinVersion:         tls.VersionTLS12,

@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [v1.3.1] - 2026-08-10
+## [v0.4.0] - 2026-08-11
+
+### Added
+- **S/MIME Encryption & Digital Signing**: Full end-to-end payload security per RFC 5751 / RFC 8551.
+  - `--smime-sign`: Cryptographically sign outgoing messages using sender's RSA/ECDSA key.
+  - `--smime-encrypt`: Encrypt email body and attachments using recipient X.509 certificates.
+  - `--smime-cert` & `--smime-key`: Specify sender's X.509 certificate and private key files.
+  - `--smime-key-password`: Passphrase for encrypted private keys (supports `v1:gcm:` encrypted secrets).
+  - `--smime-pkcs12`: Load enterprise PKCS#12 (`.pfx`/`.p12`) bundles containing client cert, private key, and CA chain.
+  - `--smime-recipient-cert` & `--smime-recipient-cert-dir`: Recipient public cert resolution with automatic SAN email/`mailto:` index matching.
+  - `--smime-algorithm`: Cipher selection (`aes-256-gcm`, `aes-128-gcm`, `aes-256-cbc`, `3des-cbc`). Note: `--smime-digest` reserved for future use (go-mail uses SHA-256 internally).
+- **S/MIME Pre-Flight Diagnostics**: Extended `--diag` mode to audit signer/recipient cert validity, expiration warnings (<30 days), X.509 `KeyUsage` flags (`DigitalSignature`, `KeyEncipherment`, `EmailProtection`), and key file permissions.
+- **S/MIME Pre-Dial Bounds Check**: Account for S/MIME Base64 + PKCS#7 envelope size overhead (1.37x expansion) prior to establishing SMTP connections.
+- **S/MIME Default Credentials**: Config file support for `smime_default_cert`, `smime_default_key`, `smime_default_key_password`, and `smime_default_pkcs12` to simplify CLI usage for automated schedulers.
+- **ESMTP SIZE Pre-Check**: For S/MIME encrypted payloads >1MB, probe server SIZE extension before sending to fail fast on oversized messages.
+
+## [v0.3.1] - 2026-08-10
 
 ### Added
 - **Single-Recipient Batch Mode**: Added `--single-recipient` flag to send individual emails per recipient with rate limiting support for high-volume distribution lists.
@@ -39,7 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [v1.3.0] - 2026-08-08
+## [v0.3.0] - 2026-08-08
 
 ### Added
 - **SASL Authentication Suite**: Added `--auth-type` flag supporting `plain`, `login`, `cram-md5`, `xoauth2`, and `auto` negotiation mechanisms.
@@ -70,79 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [v1.2.0] - 2026-08-07
+## [v0.0.0] - 2026-08-07
 
-### Added
-- Added implicit TLS (SMTPS via `mail.WithSSL()`) support for SMTP on port 465.
-
----
-
-## [v1.1.9] - 2026-06-18
-
-### Fixed
-- Fixed `priorityInt` function logic to check for zero values and ensure command line arguments override configuration files.
-- Refactored configuration parsing and usage documentation.
-
----
-
-## [v1.1.8] - 2025-02-14
-
-### Added
-- Added Reply-To header support (`--reply-to` / `-r`).
-- Added version display flag (`-v` / `--version`).
-
----
-
-## [v1.1.7] - 2025-02-10
-
-### Added
-- Added `--no-auth` / `-na` option for unauthenticated local SMTP relay hosts.
-
----
-
-## [v1.1.6] - 2024-08-18
-
-### Fixed
-- Fixed configuration file search path order and priority resolution.
-
----
-
-## [v1.1.5] - 2024-05-16
-
-### Changed
-- Updated `.gitignore` rules for local build targets.
-
----
-
-## [v1.1.4] - 2024-05-14
-
-### Added
-- Added enhanced TLS modes (`none`, `tls-skip`, `tls`) to support self-signed certificates and unencrypted internal relays.
-
----
-
-## [v1.1.3] - 2023-12-28
-
-### Changed
-- Updated README.md documentation and usage examples.
-
----
-
-## [v1.1.2] - 2023-12-25
-
-### Changed
-- Upgraded SMTP backend library from `gopkg.in/mail.v2` to `wneessen/go-mail` for modern RFC compliance and performance.
-
----
-
-## [v1.1.0] - 2023-12-23
-
-### Added
-- Added JSON configuration file support (`--config` / `-c` and `~/.config/mail2go/config.json`).
-
----
-
-## [v1.0.0] - 2023-12-21
-
-### Added
-- Initial public release of `Mail2Go` lightweight command-line SMTP client.
+### Functional rebase
+- Used https://github.com/KeepSec-Technologies/Mail2Go v1.2.0 for the core SMTP client.

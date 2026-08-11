@@ -107,6 +107,24 @@ type Config struct {
 	AttachmentsDir    string            `json:"attachments_dir"`
 	MaxAttachmentMB   int               `json:"max_attachment_size_mb"`
 	NoLogRecipients   bool              `json:"no_log_recipients"`
+
+	// S/MIME Security Configuration
+	SMIMESign             bool     `json:"smime_sign"`
+	SMIMEEncrypt          bool     `json:"smime_encrypt"`
+	SMIMECert             string   `json:"smime_cert"`
+	SMIMEKey              string   `json:"smime_key"`
+	SMIMEKeyPassword      string   `json:"smime_key_password"`
+	SMIMEPKCS12           string   `json:"smime_pkcs12"`
+	SMIMERecipientCerts   []string `json:"smime_recipient_certs"`
+	SMIMERecipientCertDir string   `json:"smime_recipient_cert_dir"`
+	SMIMEAlgorithm        string   `json:"smime_algorithm"`
+	SMIMEDigest           string   `json:"smime_digest"`
+
+	// S/MIME Default Credentials (used when --smime-sign/--smime-encrypt without explicit paths)
+	SMIMEDefaultCert        string `json:"smime_default_cert"`
+	SMIMEDefaultKey         string `json:"smime_default_key"`
+	SMIMEDefaultKeyPassword string `json:"smime_default_key_password"`
+	SMIMEDefaultPKCS12      string `json:"smime_default_pkcs12"`
 }
 
 // LoadConfig decodes a JSON configuration file from disk.

@@ -12,7 +12,7 @@
 ## 2. Software Design Patterns
 
 ### 2.1 Factory Pattern (`clientFactory`)
-* **Location:** [mailer.go](./mailer.go#L19-L23)
+* **Location:** [mailer.go](../mailer.go#L19-L23)
 * **Purpose:** Decouples `mail.NewClient` initialization from `SendEmail` execution logic.
 * **Implementation:** `defaultClientFactory` allows unit tests to inject mock SMTP clients (`mockSender`) without establishing remote TCP connections.
 
@@ -25,7 +25,7 @@ type clientFactory func(host string, opts ...mail.Option) (clientSender, error)
 ```
 
 ### 2.2 Chain of Responsibility & Precedence Strategy
-* **Location:** [cli.go](./cli.go#L360-L435)
+* **Location:** [cli.go](../cli.go#L360-L435)
 * **Purpose:** Evaluates runtime settings across CLI short flags, CLI long flags, JSON configuration files, process environment variables, provider presets, and built-in defaults.
 * **Implementation:** `priorityString` and `priorityInt` process low-to-high priority slices:
   $$\text{Priority Slice} = [\text{Config File}, \text{Environment Variables}, \text{CLI Long Flags}, \text{CLI Short Flags}]$$
@@ -43,7 +43,7 @@ func priorityString(strings []string) string {
 ```
 
 ### 2.3 Strategy Pattern for SASL Authentication
-* **Location:** [mailer.go](./mailer.go#L260-L288)
+* **Location:** [mailer.go](../mailer.go#L260-L288)
 * **Purpose:** Dynamically constructs SASL authentication options based on user preference or remote ESMTP capability advertisement (`EHLO`).
 * **Supported Strategies:**
   - `SMTPAuthNoAuth`: go-mail's built-in no-authentication mode for unauthenticated relays.
@@ -53,7 +53,7 @@ func priorityString(strings []string) string {
   - `SMTPAuthXOAUTH2`: OAuth 2.0 Access Token bearer authentication (RFC 6749).
 
 ### 2.4 Decorator Pattern for TLS Configuration
-* **Location:** [crypto.go](./crypto.go)
+* **Location:** [crypto.go](../crypto.go)
 * **Purpose:** Extends standard TLS configuration with custom trust stores, fingerprint pinning, and encrypted credential decryption.
 * **Components:**
   - `loadCustomCACerts`: Loads PEM certificates from file or directory into a custom CA pool.
@@ -83,7 +83,7 @@ The error handling design guarantees non-zero exit status codes for all abnormal
 ## 4. Cross-Platform I/O & Memory Optimization
 
 ### 4.1 CRLF Line Normalization
-File parsing functions in [util.go](./util.go) process recipient list files and attachment list files using `bufio.Scanner`. This design:
+File parsing functions in [util.go](../util.go) process recipient list files and attachment list files using `bufio.Scanner`. This design:
 - Automatically strips carriage returns (`\r`) on Windows line endings (`\r\n`).
 - Filters `#` comment lines and empty lines.
 - Prevents file corruption when crossing operating system boundaries.
