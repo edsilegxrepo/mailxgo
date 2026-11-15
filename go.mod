@@ -8,11 +8,11 @@ require (
 	github.com/wneessen/go-mail v0.8.1
 	github.com/zeebo/xxh3 v1.1.0
 	go.mozilla.org/pkcs7 v0.10.0
-	golang.org/x/crypto v0.58.0
+	golang.org/x/crypto v0.59.0
 )
 
 require (
 	github.com/klauspost/cpuid/v2 v2.4.1 // indirect
-	golang.org/x/sys v0.49.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 )
