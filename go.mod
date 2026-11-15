@@ -3,7 +3,7 @@ module github.com/edsilegxrepo/mailxgo
 go 1.26.0
 
 require (
-	github.com/edsilegxrepo/secretprotector v0.0.4
+	github.com/edsilegxrepo/secretprotector v0.0.5
 	github.com/klauspost/compress v1.20.3
 	github.com/wneessen/go-mail v0.8.1
 	github.com/zeebo/xxh3 v1.1.0
